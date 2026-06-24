@@ -563,6 +563,7 @@ Score card:
 - App-native and elegant, not a literal copy of the photo.
 - Colored row bands with lightly row-tinted number tiles.
 - Normal number tiles should be clearly lighter than the row band but tinted enough that pure white legal hints stand out.
+- Normal number tiles should have crisp edges without a separate pale or white border between the tile and row background.
 - Color total boxes should use the same row-tinted fills as the score row number tiles.
 - Bold black X for selected marks.
 - Lock circles should be visually clear but compact.

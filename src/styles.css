@@ -504,31 +504,31 @@ button:focus-visible {
   padding: 5px;
   border-radius: 8px;
   --row-tile-fill: rgba(255, 255, 255, 0.92);
-  --row-tile-border: rgba(255, 255, 255, 0.65);
+  --row-tile-border: var(--row-tile-fill);
 }
 
 .score-row.red {
   background: var(--red);
   --row-tile-fill: #fca5a5;
-  --row-tile-border: #fecaca;
+  --row-tile-border: var(--row-tile-fill);
 }
 
 .score-row.yellow {
   background: var(--yellow);
-  --row-tile-fill: #fde047;
-  --row-tile-border: #fef08a;
+  --row-tile-fill: #fde68a;
+  --row-tile-border: var(--row-tile-fill);
 }
 
 .score-row.green {
   background: var(--green);
   --row-tile-fill: #86efac;
-  --row-tile-border: #bbf7d0;
+  --row-tile-border: var(--row-tile-fill);
 }
 
 .score-row.blue {
   background: var(--blue);
   --row-tile-fill: #93c5fd;
-  --row-tile-border: #bfdbfe;
+  --row-tile-border: var(--row-tile-fill);
 }
 
 .score-row.closed {
@@ -760,7 +760,7 @@ button:focus-visible {
 }
 
 .total-box.yellow {
-  background: #fde047;
+  background: #fde68a;
   border-color: #fef08a;
 }
 
