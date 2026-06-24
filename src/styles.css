@@ -469,9 +469,12 @@ button:focus-visible {
   border-radius: 8px;
   background: var(--surface);
   color: var(--ink);
+  padding: 0;
+  text-align: center;
   font-size: 0.92rem;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .sum-box:disabled {
@@ -533,6 +536,8 @@ button:focus-visible {
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.92);
   color: var(--ink);
+  padding: 0;
+  text-align: center;
   font-weight: 950;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -546,17 +551,13 @@ button:focus-visible {
 .score-tile span {
   position: relative;
   z-index: 1;
-}
-
-.score-tile.final::before {
-  content: "";
-  position: absolute;
-  top: 4px;
-  bottom: 4px;
-  left: -4px;
-  width: 2px;
-  border-radius: 2px;
-  background: rgba(24, 24, 27, 0.34);
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-width: 0;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .score-tile.hint-white {
@@ -565,12 +566,7 @@ button:focus-visible {
 }
 
 .score-tile.hint-mixed {
-  box-shadow:
-    inset 0 0 0 3px var(--ink),
-    0 0 0 2px rgba(255, 255, 255, 0.46);
-}
-
-.lock-tile.hint-lock {
+  border-color: var(--ink);
   box-shadow: inset 0 0 0 2px var(--ink);
 }
 

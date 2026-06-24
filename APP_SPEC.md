@@ -184,10 +184,9 @@ Each row includes:
 
 - Colored row band.
 - White number tiles.
-- A divider line between the last two number tiles:
-  - Red/yellow: between 11 and 12.
-  - Green/blue: between 3 and 2.
 - A lock circle after the final number.
+
+Number labels should be centered in their tiles, including double-digit labels.
 
 Selected number tiles should use a clean black X mark.
 
@@ -254,8 +253,9 @@ Legal-move visual hints are controlled by the legal options hint toggle:
 - Hints affect only visual treatment, not whether a control is enabled.
 - When hints are off, legal score-card tiles look completely normal but remain clickable.
 - When hints are on, legal white-sum score-card options use a bright white tile treatment.
-- When hints are on, legal colored/mixed-sum score-card options use a thick black border.
+- When hints are on, legal colored/mixed-sum score-card number options use a clean thick black border with no pale edge behind it.
 - If a tile is legal as both a white-sum option and a colored/mixed-sum option, it gets both indicators at the same time.
+- Hints apply only to number tiles. Lock buttons do not receive hint styling.
 - Opponent-turn white sum strip affordance is not controlled by this toggle. The glowing blue outline remains visible until the white sum is selected.
 
 ### Opponent Turn Selection

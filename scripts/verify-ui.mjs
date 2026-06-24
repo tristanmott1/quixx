@@ -146,6 +146,7 @@ async function runFlowChecks(page) {
 
   await page.getByRole("button", { name: "Show legal options" }).click();
   assert((await page.locator("button.score-tile.hint-white, button.score-tile.hint-mixed").count()) > 0, "Hint toggle shows legal options.");
+  assert((await page.locator("button.lock-tile[class*='hint-']").count()) === 0, "Hint toggle does not style lock buttons.");
   await page.getByRole("button", { name: "Hide legal options" }).click();
 
   const firstLegalTile = page.locator("button.score-tile.legal").first();

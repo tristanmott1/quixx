@@ -1601,8 +1601,6 @@ function ScoreRow({
         const roles = legalMarkRoles.get(key);
         const whiteHint = showHints && Boolean(roles?.has("white"));
         const mixedHint = showHints && Boolean(roles?.has("mixed"));
-        const final = number === config.finalNumber;
-
         return (
           <button
             className={[
@@ -1611,7 +1609,6 @@ function ScoreRow({
               legal ? "legal" : "",
               whiteHint ? "hint-white" : "",
               mixedHint ? "hint-mixed" : "",
-              final ? "final" : "",
             ]
               .filter(Boolean)
               .join(" ")}
@@ -1632,7 +1629,6 @@ function ScoreRow({
           ownLock ? "own" : "",
           opponentLock ? "opponent" : "",
           canLock ? "legal" : "",
-          canLock && showHints ? "hint-lock" : "",
         ]
           .filter(Boolean)
           .join(" ")}
