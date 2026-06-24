@@ -492,6 +492,7 @@ Dice:
 
 - Large, tappable, rounded square dice.
 - Pips instead of numerals.
+- Pips should use standard Western dice placement: centers at roughly 25%, 50%, and 75% of the die face, with 6 using left/right columns and 3 using a top-left to bottom-right diagonal.
 - Colored dice use white pips.
 - White dice use dark pips.
 - A small restrained roll animation is acceptable.
