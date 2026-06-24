@@ -73,6 +73,7 @@ The Play page contains:
 
 - Top actions.
 - Dice section.
+- Turn action row.
 - Score card section.
 - Live score totals.
 
@@ -82,16 +83,28 @@ The Play page should include always-present controls for:
 
 - Exit: return to Home and clear the active game, while keeping the saved roster and selected user player.
 - Start over: restart the game with the same player order and same selected user player, clearing the score card, locks, penalties, dice state, and game-over state.
-- Undo: reset the current uncommitted turn state.
+- Legal options hint toggle: show or hide score-card legal-move hints. The default is off, and the preference persists locally.
 
 Controls should use icons whenever possible:
 
 - Exit can use an X or back-style icon.
 - Start over can use a rotate/reset icon.
-- Undo should preferably use a curved back arrow icon and may omit visible text.
-- Next should use a forward/down/right movement icon and may omit visible text if the icon is clear.
+- Legal options hint toggle should use an eye / eye-off icon and may omit visible text.
 
 Use aria labels for icon-only controls.
+
+Top action layout:
+
+- Exit is in the left corner.
+- Start over is in the right corner.
+- The legal options hint toggle is immediately to the right of Start over in the top-right action group.
+- Undo and Next do not live in the top action bar.
+
+Because Exit and Start over cannot be undone:
+
+- Pressing Exit opens a confirmation pop-up before leaving the active game.
+- Pressing Start over opens a confirmation pop-up before clearing and restarting the active game.
+- These confirmation pop-ups should be minimal and icon-friendly, matching the roll-undo confirmation style.
 
 ### Dice Section
 
@@ -132,11 +145,24 @@ On the user's turn:
 
 On an opponent's turn:
 
-- The dice grid is disabled.
+- The dice grid is disabled and should appear in a lighter, paler color so it reads as non-interactive.
 - The 2-12 white sum boxes are enabled.
+- Before a white sum is selected, the full row of 2-12 white sum boxes should have a glowing blue outline, showing that this is the required interaction.
 - The user selects the sum of the two white dice based on the opponent's physical roll.
 - After the white sum is selected, it is highlighted.
+- After the white sum is selected, the glowing blue outline disappears.
 - The score card selection stage begins.
+
+### Turn Action Row
+
+Undo and Next sit side by side between the dice section and the score card section.
+
+- Undo is on the left.
+- Next is on the right.
+- Next should remain visually stronger than Undo.
+- Both controls may be icon-only if the icons are clear.
+- Undo should use a curved back arrow icon.
+- Next should use a forward/down/right movement icon.
 
 ## Score Card Layout
 
@@ -216,10 +242,21 @@ The app should prevent illegal moves by disabling controls, not by allowing a mo
 
 At every point in the selection stage:
 
-- Highlight exactly the legal next presses.
+- Enable exactly the legal next presses.
 - Disable all illegal presses.
 - Recompute legal moves after every roll, white-sum selection, score-card selection, penalty selection, and staged lock.
 - Keep defensive validation in handlers for stale events or double taps, but the normal UI must not offer illegal moves.
+
+Legal-move visual hints are controlled by the legal options hint toggle:
+
+- The default is off.
+- The preference persists locally.
+- Hints affect only visual treatment, not whether a control is enabled.
+- When hints are off, legal score-card tiles look completely normal but remain clickable.
+- When hints are on, legal white-sum score-card options use a bright white tile treatment.
+- When hints are on, legal colored/mixed-sum score-card options use a thick black border.
+- If a tile is legal as both a white-sum option and a colored/mixed-sum option, it gets both indicators at the same time.
+- Opponent-turn white sum strip affordance is not controlled by this toggle. The glowing blue outline remains visible until the white sum is selected.
 
 ### Opponent Turn Selection
 
@@ -304,6 +341,12 @@ Penalty behavior:
 
 The Play page should also include a small control to indicate that an opponent has reached 4 penalties. Pressing it ends the game.
 
+Penalty row layout:
+
+- The user's four penalty markers are on the left side of the penalty row.
+- The opponent 4x penalty button is on the right side of the penalty row.
+- The opponent 4x penalty button should not live in the top action bar.
+
 ## Next Button
 
 Next commits the current turn.
@@ -336,18 +379,32 @@ If the current player is the last player, wrap to the first player. There are no
 
 ## Undo Button
 
-Undo resets the current uncommitted turn state.
+Undo reverses exactly the most recent uncommitted user action.
 
-It applies to:
+Every user click that changes turn state creates one undoable action. Anything selected by a single user click is exactly one action.
 
-- Dice roll.
+Undoable actions include:
+
+- Dice roll on the user's turn.
 - Opponent white-sum selection.
-- Score-card selections.
+- Score-card number selection.
 - Penalty selection.
-- Staged own row closures.
-- Staged opponent row locks.
+- Opponent row lock selection.
+
+Special undo cases:
+
+- Selecting a final number is one action. Undo removes both the final number and its automatic own-lock mark together.
+- Undoing an opponent lock removes only that staged opponent lock.
+- Undoing a penalty clears only that staged penalty.
+- Undoing a score-card number removes only that selected number and any automatic lock that came from that same click.
+- Undoing an opponent white-sum selection returns to the "choose white sum" state. Any later score-card or lock actions would already have been undone first.
+- Undoing a user's dice roll requires a confirmation modal because a random roll cannot be reliably repeated.
 
 Undo does not change committed history after Next has been pressed.
+
+Pressing Next, Exit, or Start over is not undoable through the turn Undo button.
+
+Exit and Start over have their own confirmation pop-ups because those actions cannot be undone.
 
 ## Game Over
 
@@ -412,6 +469,7 @@ Persist locally:
 
 - Player roster.
 - Selected user player.
+- Legal options hint preference.
 - Active game state.
 - Current page.
 - Current player index.
@@ -421,12 +479,14 @@ Persist locally:
 - Closed rows.
 - Penalties.
 - Current uncommitted turn state.
+- Current uncommitted turn undo history.
 - Game-over state.
 
 Suggested storage keys:
 
 - `qwixx.players.v1`
 - `qwixx.selectedPlayer.v1`
+- `qwixx.showHints.v1`
 - `qwixx.activeGame.v1`
 
 Restoring the app should resume the active game as it appeared before refresh or app close.
@@ -487,6 +547,7 @@ Controls:
 - Use visible text only where it materially improves clarity.
 - Provide aria labels for icon-only controls.
 - Disabled controls should be visibly disabled.
+- Place global actions in the top bar and turn-stage actions between dice and score card.
 
 Dice:
 
@@ -522,8 +583,10 @@ Before considering an implementation complete:
 - Verify the Home player controls match the agreed behavior.
 - Verify the Play page at mobile and desktop widths.
 - Verify dice rolling and manual white-sum selection.
-- Verify legal move highlighting and disabled illegal moves.
+- Verify legal move enabling, disabled illegal moves, and hint-toggle visuals.
 - Verify ambiguous selections remain valid until forced.
+- Verify one-action-at-a-time undo and roll-undo confirmation.
+- Verify Exit and Start over confirmation pop-ups.
 - Verify row closing, staged locks, die removal after Next, and multiple row closures.
 - Verify scoring, penalties, and game-over conditions.
 - Verify reload persistence.

@@ -1,6 +1,8 @@
 import {
   AlertTriangle,
   ArrowRight,
+  Eye,
+  EyeOff,
   GripVertical,
   Lock,
   Plus,
@@ -50,12 +52,24 @@ type DiceRoll = {
   blue?: number;
 };
 
-type TurnDraft = {
+type TurnCore = {
   roll: DiceRoll | null;
   opponentWhiteSum: number | null;
   selectedMarks: ScoreMark[];
   penalty: boolean;
   opponentLocks: RowColor[];
+};
+
+type UndoKind = "roll" | "whiteSum" | "mark" | "penalty" | "opponentLock";
+type MarkRole = "white" | "mixed";
+
+type UndoEntry = {
+  before: TurnCore;
+  kind: UndoKind;
+};
+
+type TurnDraft = TurnCore & {
+  history: UndoEntry[];
 };
 
 type ActiveGame = {
@@ -79,6 +93,7 @@ type RowConfig = {
 
 const PLAYERS_KEY = "qwixx.players.v1";
 const SELECTED_PLAYER_KEY = "qwixx.selectedPlayer.v1";
+const SHOW_HINTS_KEY = "qwixx.showHints.v1";
 const ACTIVE_GAME_KEY = "qwixx.activeGame.v1";
 
 const ROW_COLORS = ["red", "yellow", "green", "blue"] as const;
@@ -145,6 +160,7 @@ function createEmptyTurn(): TurnDraft {
     selectedMarks: [],
     penalty: false,
     opponentLocks: [],
+    history: [],
   };
 }
 
@@ -172,6 +188,30 @@ function isValidSum(value: unknown): value is number {
 
 function uniqueRows(rows: RowColor[]) {
   return rows.filter((row, index) => rows.indexOf(row) === index);
+}
+
+function toTurnCore(turn: TurnDraft): TurnCore {
+  return {
+    roll: turn.roll,
+    opponentWhiteSum: turn.opponentWhiteSum,
+    selectedMarks: turn.selectedMarks,
+    penalty: turn.penalty,
+    opponentLocks: turn.opponentLocks,
+  };
+}
+
+function withUndoHistory(currentTurn: TurnDraft, nextTurn: TurnCore, kind: UndoKind): TurnDraft {
+  return {
+    ...nextTurn,
+    history: [...currentTurn.history, { before: toTurnCore(currentTurn), kind }],
+  };
+}
+
+function restoreUndoEntry(turn: TurnDraft, entry: UndoEntry): TurnDraft {
+  return {
+    ...entry.before,
+    history: turn.history.slice(0, -1),
+  };
 }
 
 function normalizePlayers(value: unknown): Player[] {
@@ -251,14 +291,19 @@ function normalizeRoll(value: unknown): DiceRoll | null {
   return roll;
 }
 
-function normalizeTurn(value: unknown): TurnDraft {
-  const turn = createEmptyTurn();
-
+function normalizeTurnCore(value: unknown): TurnCore {
+  const turn: TurnCore = {
+    roll: null,
+    opponentWhiteSum: null,
+    selectedMarks: [],
+    penalty: false,
+    opponentLocks: [],
+  };
   if (!value || typeof value !== "object") {
     return turn;
   }
 
-  const rawTurn = value as Partial<TurnDraft>;
+  const rawTurn = value as Partial<TurnCore>;
   const opponentWhiteSum = Number(rawTurn.opponentWhiteSum);
 
   turn.roll = normalizeRoll(rawTurn.roll);
@@ -292,6 +337,43 @@ function normalizeTurn(value: unknown): TurnDraft {
   return turn;
 }
 
+function normalizeUndoEntry(value: unknown): UndoEntry | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const rawEntry = value as Partial<UndoEntry>;
+  const kind = rawEntry.kind;
+
+  if (
+    kind !== "roll" &&
+    kind !== "whiteSum" &&
+    kind !== "mark" &&
+    kind !== "penalty" &&
+    kind !== "opponentLock"
+  ) {
+    return null;
+  }
+
+  return {
+    before: normalizeTurnCore(rawEntry.before),
+    kind,
+  };
+}
+
+function normalizeTurn(value: unknown): TurnDraft {
+  const core = normalizeTurnCore(value);
+  const rawTurn = value && typeof value === "object" ? (value as Partial<TurnDraft>) : null;
+  const history = Array.isArray(rawTurn?.history)
+    ? rawTurn.history.map(normalizeUndoEntry).filter((entry): entry is UndoEntry => Boolean(entry))
+    : [];
+
+  return {
+    ...core,
+    history,
+  };
+}
+
 function readStoredPlayers(): Player[] {
   try {
     return normalizePlayers(JSON.parse(localStorage.getItem(PLAYERS_KEY) ?? "[]"));
@@ -306,6 +388,14 @@ function readSelectedPlayerId() {
     return value || null;
   } catch {
     return null;
+  }
+}
+
+function readStoredShowHints() {
+  try {
+    return localStorage.getItem(SHOW_HINTS_KEY) === "true";
+  } catch {
+    return false;
   }
 }
 
@@ -487,7 +577,7 @@ function getMixedSums(turn: TurnDraft) {
 }
 
 function getRolesForMark(mark: ScoreMark, whiteSum: number | null, mixedSums: Partial<Record<RowColor, number[]>>) {
-  const roles: Array<"white" | "mixed"> = [];
+  const roles: MarkRole[] = [];
 
   if (whiteSum === mark.number) {
     roles.push("white");
@@ -570,6 +660,68 @@ function getLegalMarkKeys({
   );
 }
 
+function getLegalMarkRoles({
+  rows,
+  turn,
+  isUserTurn,
+  gameOver,
+}: {
+  rows: RowsState;
+  turn: TurnDraft;
+  isUserTurn: boolean;
+  gameOver: boolean;
+}) {
+  const roleMap = new Map<string, Set<MarkRole>>();
+
+  if (gameOver) {
+    return roleMap;
+  }
+
+  const whiteSum = getWhiteSum(turn, isUserTurn);
+
+  if (!whiteSum) {
+    return roleMap;
+  }
+
+  if (!isUserTurn) {
+    if (turn.selectedMarks.length > 0 || turn.penalty) {
+      return roleMap;
+    }
+
+    getCandidateMarks(rows, turn)
+      .filter((mark) => mark.number === whiteSum)
+      .forEach((mark) => roleMap.set(markKey(mark), new Set(["white"])));
+    return roleMap;
+  }
+
+  if (turn.penalty || turn.selectedMarks.length >= 2) {
+    return roleMap;
+  }
+
+  const mixedSums = getMixedSums(turn);
+
+  getCandidateMarks(rows, turn).forEach((mark) => {
+    const roles = getRolesForMark(mark, whiteSum, mixedSums);
+    const legalRoles = new Set<MarkRole>();
+
+    if (turn.selectedMarks.length === 0) {
+      roles.forEach((role) => {
+        if (hasValidUserInterpretation([mark], turn)) {
+          legalRoles.add(role);
+        }
+      });
+    } else if (roles.includes("mixed") && hasValidUserInterpretation([...turn.selectedMarks, mark], turn)) {
+      legalRoles.add("mixed");
+    }
+
+    if (legalRoles.size > 0) {
+      roleMap.set(markKey(mark), legalRoles);
+    }
+  });
+
+  return roleMap;
+}
+
 function canSelectPenalty(turn: TurnDraft, isUserTurn: boolean, penalties: number, gameOver: boolean) {
   return (
     isUserTurn &&
@@ -649,6 +801,8 @@ function App() {
   const [gameOverReason, setGameOverReason] = useState<ActiveGame["gameOverReason"]>(
     savedGame?.gameOverReason ?? null,
   );
+  const [showHints, setShowHints] = useState(readStoredShowHints);
+  const [confirmAction, setConfirmAction] = useState<"rollUndo" | "exit" | "startOver" | null>(null);
   const [draggingPlayerId, setDraggingPlayerId] = useState<string | null>(null);
   const [rollAnimationKey, setRollAnimationKey] = useState(0);
   const draftNameInputRef = useRef<HTMLInputElement>(null);
@@ -662,6 +816,10 @@ function App() {
     () => getLegalMarkKeys({ rows, turn, isUserTurn, gameOver }),
     [rows, turn, isUserTurn, gameOver],
   );
+  const legalMarkRoles = useMemo(
+    () => getLegalMarkRoles({ rows, turn, isUserTurn, gameOver }),
+    [rows, turn, isUserTurn, gameOver],
+  );
   const nextEnabled = canAdvanceTurn(turn, isUserTurn, gameOver);
   const penaltyEnabled = canSelectPenalty(turn, isUserTurn, penalties, gameOver);
   const totalScore = getTotalScore(rows, penalties, turn);
@@ -670,12 +828,7 @@ function App() {
     players.length > 0 &&
     players.every((player) => player.name.trim().length > 0) &&
     Boolean(selectedPlayerId && selectedPlayerExists);
-  const hasTurnDraft =
-    Boolean(turn.roll) ||
-    turn.opponentWhiteSum !== null ||
-    turn.selectedMarks.length > 0 ||
-    turn.penalty ||
-    turn.opponentLocks.length > 0;
+  const canUndo = turn.history.length > 0 && !gameOver;
 
   useEffect(() => {
     localStorage.setItem(PLAYERS_KEY, JSON.stringify(players));
@@ -688,6 +841,10 @@ function App() {
       localStorage.removeItem(SELECTED_PLAYER_KEY);
     }
   }, [selectedPlayerId]);
+
+  useEffect(() => {
+    localStorage.setItem(SHOW_HINTS_KEY, showHints ? "true" : "false");
+  }, [showHints]);
 
   useEffect(() => {
     if (selectedPlayerId && !players.some((player) => player.id === selectedPlayerId)) {
@@ -831,11 +988,25 @@ function App() {
       return;
     }
 
+    setConfirmAction("startOver");
+  }
+
+  function confirmStartOver() {
+    if (!selectedPlayerId || gamePlayers.length === 0) {
+      return;
+    }
+
+    setConfirmAction(null);
     startGame(gamePlayers, selectedPlayerId);
   }
 
   function exitToHome() {
+    setConfirmAction("exit");
+  }
+
+  function confirmExitToHome() {
     localStorage.removeItem(ACTIVE_GAME_KEY);
+    setConfirmAction(null);
     setPage("home");
     setGamePlayers([]);
     setCurrentPlayerIndex(0);
@@ -857,14 +1028,13 @@ function App() {
         return currentTurn;
       }
 
-      return {
-        ...currentTurn,
+      return withUndoHistory(currentTurn, {
         roll: rollDice(rows),
         opponentWhiteSum: null,
         selectedMarks: [],
         penalty: false,
         opponentLocks: [],
-      };
+      }, "roll");
     });
     setRollAnimationKey((key) => key + 1);
   }
@@ -879,14 +1049,13 @@ function App() {
         return currentTurn;
       }
 
-      return {
-        ...currentTurn,
+      return withUndoHistory(currentTurn, {
         roll: null,
         opponentWhiteSum: sum,
         selectedMarks: [],
         penalty: false,
         opponentLocks: [],
-      };
+      }, "whiteSum");
     });
   }
 
@@ -902,10 +1071,13 @@ function App() {
         return currentTurn;
       }
 
-      return {
-        ...currentTurn,
+      return withUndoHistory(currentTurn, {
+        roll: currentTurn.roll,
+        opponentWhiteSum: currentTurn.opponentWhiteSum,
         selectedMarks: [...currentTurn.selectedMarks, mark],
-      };
+        penalty: currentTurn.penalty,
+        opponentLocks: currentTurn.opponentLocks,
+      }, "mark");
     });
   }
 
@@ -919,11 +1091,13 @@ function App() {
         return currentTurn;
       }
 
-      return {
-        ...currentTurn,
+      return withUndoHistory(currentTurn, {
+        roll: currentTurn.roll,
+        opponentWhiteSum: currentTurn.opponentWhiteSum,
         penalty: true,
         selectedMarks: [],
-      };
+        opponentLocks: currentTurn.opponentLocks,
+      }, "penalty");
     });
   }
 
@@ -937,19 +1111,57 @@ function App() {
         return currentTurn;
       }
 
-      return {
-        ...currentTurn,
+      return withUndoHistory(currentTurn, {
+        roll: currentTurn.roll,
+        opponentWhiteSum: currentTurn.opponentWhiteSum,
+        selectedMarks: currentTurn.selectedMarks,
+        penalty: currentTurn.penalty,
         opponentLocks: uniqueRows([...currentTurn.opponentLocks, row]),
-      };
+      }, "opponentLock");
     });
   }
 
   function undoTurn() {
-    if (!hasTurnDraft || gameOver) {
+    if (!canUndo) {
       return;
     }
 
-    setTurn(createEmptyTurn());
+    const latestEntry = turn.history.at(-1);
+
+    if (latestEntry?.kind === "roll") {
+      setConfirmAction("rollUndo");
+      return;
+    }
+
+    performUndo();
+  }
+
+  function performUndo() {
+    setTurn((currentTurn) => {
+      const latestEntry = currentTurn.history.at(-1);
+      return latestEntry ? restoreUndoEntry(currentTurn, latestEntry) : currentTurn;
+    });
+    setConfirmAction(null);
+  }
+
+  function cancelConfirmAction() {
+    setConfirmAction(null);
+  }
+
+  function confirmPendingAction() {
+    if (confirmAction === "rollUndo") {
+      performUndo();
+      return;
+    }
+
+    if (confirmAction === "exit") {
+      confirmExitToHome();
+      return;
+    }
+
+    if (confirmAction === "startOver") {
+      confirmStartOver();
+    }
   }
 
   function endByOpponentPenalties() {
@@ -1134,27 +1346,16 @@ function App() {
                 <X size={19} />
               </button>
               <div className="play-actions">
-                <button
-                  className="icon-action"
-                  type="button"
-                  onClick={undoTurn}
-                  disabled={!hasTurnDraft || gameOver}
-                  aria-label="Undo"
-                >
-                  <Undo2 size={19} />
-                </button>
                 <button className="icon-action" type="button" onClick={startOver} aria-label="Start over">
                   <RotateCcw size={19} />
                 </button>
                 <button
-                  className="icon-action warning"
+                  className={showHints ? "icon-action selected" : "icon-action"}
                   type="button"
-                  onClick={endByOpponentPenalties}
-                  disabled={gameOver}
-                  aria-label="Opponent reached four penalties"
+                  onClick={() => setShowHints((currentShowHints) => !currentShowHints)}
+                  aria-label={showHints ? "Hide legal options" : "Show legal options"}
                 >
-                  <AlertTriangle size={18} />
-                  <span>4x</span>
+                  {showHints ? <Eye size={19} /> : <EyeOff size={19} />}
                 </button>
               </div>
             </div>
@@ -1169,10 +1370,14 @@ function App() {
               roll={turn.roll}
               rollAnimationKey={rollAnimationKey}
               enabled={isUserTurn && !gameOver && !turn.roll}
+              pale={!isUserTurn}
               onRoll={handleRollDice}
             />
 
-            <div className="sum-strip" aria-label="White dice sum">
+            <div
+              className={!isUserTurn && !gameOver && turn.opponentWhiteSum === null ? "sum-strip needs-input" : "sum-strip"}
+              aria-label="White dice sum"
+            >
               {SUM_NUMBERS.map((sum) => {
                 const selectable = !isUserTurn && !gameOver && turn.opponentWhiteSum === null;
                 return (
@@ -1191,6 +1396,27 @@ function App() {
             </div>
           </section>
 
+          <div className="turn-action-row">
+            <button
+              className="secondary turn-action-button"
+              type="button"
+              onClick={undoTurn}
+              disabled={!canUndo}
+              aria-label="Undo"
+            >
+              <Undo2 size={21} />
+            </button>
+            <button
+              className="primary turn-action-button"
+              type="button"
+              onClick={commitTurn}
+              disabled={!nextEnabled}
+              aria-label="Next"
+            >
+              <ArrowRight size={23} />
+            </button>
+          </div>
+
           <section className="score-card" aria-label="Score card">
             <div className="score-rows">
               {ROW_COLORS.map((row) => (
@@ -1200,6 +1426,8 @@ function App() {
                   rows={rows}
                   turn={turn}
                   legalMarkKeys={legalMarkKeys}
+                  legalMarkRoles={legalMarkRoles}
+                  showHints={showHints}
                   canLock={canStageOpponentLock(row, rows, turn, diceStageDone, gameOver)}
                   gameOver={gameOver}
                   onSelectMark={selectMark}
@@ -1209,21 +1437,33 @@ function App() {
             </div>
 
             <div className="penalty-row">
-              <button
-                className={turn.penalty ? "penalty-button legal selected" : penaltyEnabled ? "penalty-button legal" : "penalty-button"}
-                type="button"
-                onClick={selectPenalty}
-                disabled={!penaltyEnabled}
-                aria-label="Penalty"
-              >
-                -5
-              </button>
-              <div className="penalty-boxes" aria-label="Penalties">
-                {Array.from({ length: MAX_PENALTIES }, (_, index) => {
-                  const selected = index < penalties || (turn.penalty && index === penalties);
-                  return <span className={selected ? "penalty-box selected" : "penalty-box"} key={index} />;
-                })}
+              <div className="penalty-left">
+                <button
+                  className={turn.penalty ? "penalty-button selected" : "penalty-button"}
+                  type="button"
+                  onClick={selectPenalty}
+                  disabled={!penaltyEnabled}
+                  aria-label="Penalty"
+                >
+                  -5
+                </button>
+                <div className="penalty-boxes" aria-label="Penalties">
+                  {Array.from({ length: MAX_PENALTIES }, (_, index) => {
+                    const selected = index < penalties || (turn.penalty && index === penalties);
+                    return <span className={selected ? "penalty-box selected" : "penalty-box"} key={index} />;
+                  })}
+                </div>
               </div>
+              <button
+                className="opponent-penalty-button"
+                type="button"
+                onClick={endByOpponentPenalties}
+                disabled={gameOver}
+                aria-label="Opponent reached four penalties"
+              >
+                <AlertTriangle size={18} />
+                <span>4x</span>
+              </button>
             </div>
 
             <div className="score-guide" aria-label="Scoring guide">
@@ -1236,17 +1476,11 @@ function App() {
 
             <ScoreTotals rows={rows} penalties={penalties} turn={turn} totalScore={totalScore} />
           </section>
-
-          <button
-            className="primary wide-button next-button"
-            type="button"
-            onClick={commitTurn}
-            disabled={!nextEnabled}
-            aria-label="Next"
-          >
-            <ArrowRight size={22} />
-          </button>
         </div>
+      ) : null}
+
+      {confirmAction ? (
+        <ConfirmModal action={confirmAction} onCancel={cancelConfirmAction} onConfirm={confirmPendingAction} />
       ) : null}
     </main>
   );
@@ -1255,18 +1489,20 @@ function App() {
 function DiceGrid({
   enabled,
   onRoll,
+  pale,
   roll,
   rollAnimationKey,
   rows,
 }: {
   enabled: boolean;
   onRoll: () => void;
+  pale: boolean;
   roll: DiceRoll | null;
   rollAnimationKey: number;
   rows: RowsState;
 }) {
   return (
-    <button className="dice-grid" type="button" onClick={onRoll} disabled={!enabled} aria-label="Roll dice">
+    <button className={pale ? "dice-grid pale" : "dice-grid"} type="button" onClick={onRoll} disabled={!enabled} aria-label="Roll dice">
       {DICE_LAYOUT.map((die) => {
         if (isRowColor(die.key) && rows[die.key].lock !== "none") {
           return null;
@@ -1329,19 +1565,23 @@ function ScoreRow({
   canLock,
   gameOver,
   legalMarkKeys,
+  legalMarkRoles,
   onSelectMark,
   onStageOpponentLock,
   row,
   rows,
+  showHints,
   turn,
 }: {
   canLock: boolean;
   gameOver: boolean;
   legalMarkKeys: Set<string>;
+  legalMarkRoles: Map<string, Set<MarkRole>>;
   onSelectMark: (mark: ScoreMark) => void;
   onStageOpponentLock: (row: RowColor) => void;
   row: RowColor;
   rows: RowsState;
+  showHints: boolean;
   turn: TurnDraft;
 }) {
   const config = ROW_CONFIGS[row];
@@ -1358,6 +1598,9 @@ function ScoreRow({
           rows[row].selected.includes(number) ||
           turn.selectedMarks.some((selectedMark) => markKey(selectedMark) === key);
         const legal = legalMarkKeys.has(key);
+        const roles = legalMarkRoles.get(key);
+        const whiteHint = showHints && Boolean(roles?.has("white"));
+        const mixedHint = showHints && Boolean(roles?.has("mixed"));
         const final = number === config.finalNumber;
 
         return (
@@ -1366,6 +1609,8 @@ function ScoreRow({
               "score-tile",
               selected ? "selected" : "",
               legal ? "legal" : "",
+              whiteHint ? "hint-white" : "",
+              mixedHint ? "hint-mixed" : "",
               final ? "final" : "",
             ]
               .filter(Boolean)
@@ -1387,6 +1632,7 @@ function ScoreRow({
           ownLock ? "own" : "",
           opponentLock ? "opponent" : "",
           canLock ? "legal" : "",
+          canLock && showHints ? "hint-lock" : "",
         ]
           .filter(Boolean)
           .join(" ")}
@@ -1424,6 +1670,47 @@ function ScoreTotals({
       <span className="total-box penalty">{getPenaltyCount(penalties, turn) * PENALTY_POINTS}</span>
       <span className="operator">=</span>
       <strong className="grand-total">{totalScore}</strong>
+    </div>
+  );
+}
+
+function ConfirmModal({
+  action,
+  onCancel,
+  onConfirm,
+}: {
+  action: "rollUndo" | "exit" | "startOver";
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const copy = {
+    exit: {
+      title: "Exit?",
+      confirmLabel: "Exit",
+    },
+    rollUndo: {
+      title: "Undo roll?",
+      confirmLabel: "Undo",
+    },
+    startOver: {
+      title: "Start over?",
+      confirmLabel: "Reset",
+    },
+  }[action];
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h2 id="confirm-title">{copy.title}</h2>
+        <div className="confirm-actions">
+          <button className="secondary" type="button" onClick={onCancel} aria-label="Cancel">
+            <X size={18} />
+          </button>
+          <button className="primary" type="button" onClick={onConfirm}>
+            {copy.confirmLabel}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

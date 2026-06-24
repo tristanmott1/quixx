@@ -142,22 +142,48 @@ async function runFlowChecks(page) {
   assert(await page.getByRole("button", { name: "Next" }).isDisabled(), "Next starts disabled on the user's turn.");
   await page.getByRole("button", { name: "Roll dice" }).click();
   assert(await page.getByRole("button", { name: "Next" }).isDisabled(), "Next stays disabled after rolling with no mark.");
+  assert((await page.locator("button.score-tile.hint-white, button.score-tile.hint-mixed").count()) === 0, "Hints default off.");
+
+  await page.getByRole("button", { name: "Show legal options" }).click();
+  assert((await page.locator("button.score-tile.hint-white, button.score-tile.hint-mixed").count()) > 0, "Hint toggle shows legal options.");
+  await page.getByRole("button", { name: "Hide legal options" }).click();
 
   const firstLegalTile = page.locator("button.score-tile.legal").first();
   assert((await firstLegalTile.count()) === 1, "At least one legal score tile appears after rolling.");
+  await page.getByRole("button", { name: "Undo" }).click();
+  assert((await page.getByRole("dialog", { name: "Undo roll?" }).count()) === 1, "Undoing a roll asks for confirmation.");
+  await page.getByRole("button", { name: "Cancel" }).click();
+  assert((await page.locator(".die .pip.visible").count()) > 0, "Canceling roll undo keeps the roll.");
+
   await firstLegalTile.click();
   assert(!(await page.getByRole("button", { name: "Next" }).isDisabled()), "Next enables after one valid user mark.");
+  await page.getByRole("button", { name: "Undo" }).click();
+  assert((await page.getByRole("dialog", { name: "Undo roll?" }).count()) === 0, "Undoing a mark does not ask for roll confirmation.");
+  assert(await page.getByRole("button", { name: "Next" }).isDisabled(), "Undoing one mark keeps the roll but disables Next.");
+  assert((await page.locator(".die .pip.visible").count()) > 0, "Undoing one mark does not clear the dice roll.");
+
+  await page.locator("button.score-tile.legal").first().click();
   await page.screenshot({ path: outputPath("play-user-mark-mobile.png"), fullPage: true });
   await page.getByRole("button", { name: "Next" }).click();
   await page.reload();
   assert((await page.getByRole("heading", { name: "Bob" }).count()) === 1, "Committed turn state persists after reload.");
+  assert((await page.locator(".sum-strip.needs-input").count()) === 1, "Opponent turn prompts the white-sum row.");
+  assert((await page.locator(".dice-grid.pale").count()) === 1, "Opponent turn dice appear pale.");
 
   await page.getByRole("button", { name: "White sum 6" }).click();
+  assert((await page.locator(".sum-strip.needs-input").count()) === 0, "White-sum prompt disappears after selection.");
   assert(!(await page.getByRole("button", { name: "Next" }).isDisabled()), "Opponent turn enables Next after white sum.");
   await page.getByRole("button", { name: "Red locked" }).click();
   await page.getByRole("button", { name: "Next" }).click();
   assert((await page.locator(".die.red").count()) === 0, "Closed red row removes the red die after Next.");
   await page.screenshot({ path: outputPath("play-red-locked-mobile.png"), fullPage: true });
+
+  await page.getByRole("button", { name: "Start over" }).click();
+  assert((await page.getByRole("dialog", { name: "Start over?" }).count()) === 1, "Start over asks for confirmation.");
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Exit" }).click();
+  assert((await page.getByRole("dialog", { name: "Exit?" }).count()) === 1, "Exit asks for confirmation.");
+  await page.getByRole("button", { name: "Cancel" }).click();
 }
 
 async function runAmbiguityChecks(page) {
