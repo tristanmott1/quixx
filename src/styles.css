@@ -750,14 +750,10 @@ button:focus-visible {
   border-radius: 999px;
 }
 
-.lock-tile.own {
+.lock-tile.own,
+.lock-tile.opponent {
   background: var(--ink);
   color: #ffffff;
-}
-
-.lock-tile.opponent {
-  background: rgba(255, 255, 255, 0.42);
-  color: rgba(24, 24, 27, 0.72);
 }
 
 .penalty-row {

@@ -187,6 +187,13 @@ async function runFlowChecks(page) {
   assert((await page.locator(".sum-strip.needs-input").count()) === 0, "White-sum prompt disappears after selection.");
   assert(!(await page.getByRole("button", { name: "Next" }).isDisabled()), "Opponent turn enables Next after white sum.");
   await page.getByRole("button", { name: "Red locked" }).click();
+  const redOpponentLockStyle = await page.locator(".score-row.red .lock-tile.opponent").evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return { background: style.backgroundColor, color: style.color };
+  });
+  assert(redOpponentLockStyle.background === "rgb(24, 24, 27)", "Opponent lock uses the selected lock background.");
+  assert(redOpponentLockStyle.color === "rgb(255, 255, 255)", "Opponent lock uses the selected lock icon color.");
+  assert((await page.locator(".total-box.red").textContent()) === "1", "Opponent lock does not add to the user's score.");
   await page.getByRole("button", { name: "Next" }).click();
   assert((await page.locator(".die.red").count()) === 0, "Closed red row removes the red die after Next.");
   await page.screenshot({ path: outputPath("play-red-locked-mobile.png"), fullPage: true });

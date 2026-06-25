@@ -446,6 +446,7 @@ In local mode, if an opponent closes a row:
 - This stages an opponent lock.
 - The row's score controls are immediately disabled for the rest of the current turn.
 - The row and corresponding die are not removed until Next is pressed.
+- The lock icon uses the same selected visual style as an own row lock.
 - The lock icon does not count as a point for the user.
 - Multiple opponent locks may be staged in one turn.
 
