@@ -1,7 +1,7 @@
 import { chromium } from "playwright";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const baseUrl = "http://127.0.0.1:5174/";
@@ -77,6 +77,32 @@ async function launchBrowser() {
   }
 
   return chromium.launch({ headless: true });
+}
+
+async function runSourceChecks() {
+  const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const removedRefs = [
+    "rowsRef",
+    "turnRef",
+    "gamePlayersRef",
+    "currentPlayerIndexRef",
+    "syncTurnIdRef",
+    "syncPhaseRef",
+    "syncRoleRef",
+    "syncReadyPayloadsRef",
+    "syncHostPlayerIdRef",
+    "selectedPlayerIdRef",
+  ];
+
+  for (const refName of removedRefs) {
+    assert(!appSource.includes(refName), `${refName} should be folded into latestRef.`);
+  }
+
+  assert(/type LatestSyncState = \{[\s\S]*penalties: number;/.test(appSource), "LatestSyncState includes penalties.");
+  assert(
+    appSource.includes("commitLocalTurnState(latest.rows, latest.penalties, latest.turn)"),
+    "Sync Advance commits from latest rows, penalties, and turn.",
+  );
 }
 
 function rowsState() {
@@ -377,6 +403,7 @@ async function runSyncTransportChecks(browser) {
 
 async function main() {
   await mkdir(outputDir, { recursive: true });
+  await runSourceChecks();
 
   const server = spawn(npmCommand(), ["exec", "vite", "--", "--host", "127.0.0.1", "--port", "5174", "--strictPort"], {
     cwd: projectRoot,

@@ -27,6 +27,7 @@ import {
   type FormEvent,
   type PointerEvent as ReactPointerEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -124,6 +125,20 @@ type GameSnapshot = {
   turn: TurnDraft;
   gameOver: boolean;
   gameOverReason: GameOverReason;
+};
+
+type LatestSyncState = {
+  rows: RowsState;
+  penalties: number;
+  turn: TurnDraft;
+  gamePlayers: Player[];
+  currentPlayerIndex: number;
+  syncTurnId: string;
+  syncPhase: SyncPhase;
+  syncRole: SyncRole;
+  syncReadyPayloads: SyncReadyPayload[];
+  syncHostPlayerId: string | null;
+  selectedPlayerId: string | null;
 };
 
 type ActiveGame = {
@@ -1057,16 +1072,19 @@ function App() {
   const draftNameInputRef = useRef<HTMLInputElement>(null);
   const hostTransportRef = useRef<SyncHostTransport | null>(null);
   const joinTransportRef = useRef<SyncJoinTransport | null>(null);
-  const rowsRef = useRef(rows);
-  const turnRef = useRef(turn);
-  const gamePlayersRef = useRef(gamePlayers);
-  const currentPlayerIndexRef = useRef(currentPlayerIndex);
-  const syncTurnIdRef = useRef(syncTurnId);
-  const syncPhaseRef = useRef(syncPhase);
-  const syncRoleRef = useRef(syncRole);
-  const syncReadyPayloadsRef = useRef(syncReadyPayloads);
-  const syncHostPlayerIdRef = useRef(syncHostPlayerId);
-  const selectedPlayerIdRef = useRef(selectedPlayerId);
+  const latestRef = useRef<LatestSyncState>({
+    rows,
+    penalties,
+    turn,
+    gamePlayers,
+    currentPlayerIndex,
+    syncTurnId,
+    syncPhase,
+    syncRole,
+    syncReadyPayloads,
+    syncHostPlayerId,
+    selectedPlayerId,
+  });
 
   const selectedPlayerExists = selectedPlayerId ? players.some((player) => player.id === selectedPlayerId) : false;
   const currentPlayer = gamePlayers[currentPlayerIndex] ?? null;
@@ -1109,6 +1127,10 @@ function App() {
     mode === "local"
       ? gameOverReason !== "opponentPenalties" && (turn.history.length > 0 || undoStack.length > 0)
       : syncPhase === "turn" && !isLocalReady && turn.history.length > 0;
+
+  function syncLatestState(updates: Partial<LatestSyncState>) {
+    latestRef.current = { ...latestRef.current, ...updates };
+  }
 
   useEffect(() => {
     localStorage.setItem(PLAYERS_KEY, JSON.stringify(players));
@@ -1170,45 +1192,34 @@ function App() {
     undoStack,
   ]);
 
-  useEffect(() => {
-    rowsRef.current = rows;
-  }, [rows]);
-
-  useEffect(() => {
-    turnRef.current = turn;
-  }, [turn]);
-
-  useEffect(() => {
-    gamePlayersRef.current = gamePlayers;
-  }, [gamePlayers]);
-
-  useEffect(() => {
-    currentPlayerIndexRef.current = currentPlayerIndex;
-  }, [currentPlayerIndex]);
-
-  useEffect(() => {
-    syncTurnIdRef.current = syncTurnId;
-  }, [syncTurnId]);
-
-  useEffect(() => {
-    syncPhaseRef.current = syncPhase;
-  }, [syncPhase]);
-
-  useEffect(() => {
-    syncRoleRef.current = syncRole;
-  }, [syncRole]);
-
-  useEffect(() => {
-    syncReadyPayloadsRef.current = syncReadyPayloads;
-  }, [syncReadyPayloads]);
-
-  useEffect(() => {
-    syncHostPlayerIdRef.current = syncHostPlayerId;
-  }, [syncHostPlayerId]);
-
-  useEffect(() => {
-    selectedPlayerIdRef.current = selectedPlayerId;
-  }, [selectedPlayerId]);
+  useLayoutEffect(() => {
+    // WebRTC callbacks outlive React renders, so they read mutable game state here.
+    latestRef.current = {
+      rows,
+      penalties,
+      turn,
+      gamePlayers,
+      currentPlayerIndex,
+      syncTurnId,
+      syncPhase,
+      syncRole,
+      syncReadyPayloads,
+      syncHostPlayerId,
+      selectedPlayerId,
+    };
+  }, [
+    rows,
+    penalties,
+    turn,
+    gamePlayers,
+    currentPlayerIndex,
+    syncTurnId,
+    syncPhase,
+    syncRole,
+    syncReadyPayloads,
+    syncHostPlayerId,
+    selectedPlayerId,
+  ]);
 
   useEffect(() => () => {
     hostTransportRef.current?.close();
@@ -1305,6 +1316,18 @@ function App() {
     hostTransportRef.current?.close();
     joinTransportRef.current?.close();
     localStorage.removeItem(ACTIVE_GAME_KEY);
+    syncLatestState({
+      rows: game.rows,
+      penalties: game.penalties,
+      turn: game.turn,
+      gamePlayers: game.players,
+      currentPlayerIndex: game.currentPlayerIndex,
+      syncPhase: "idle",
+      syncRole: null,
+      syncReadyPayloads: [],
+      syncHostPlayerId: null,
+      selectedPlayerId: nextSelectedPlayerId,
+    });
     setMode("local");
     setSyncRole(null);
     setSyncPhase("idle");
@@ -1327,12 +1350,23 @@ function App() {
   }
 
   function resetPlayState(nextPlayers: Player[], nextSelectedPlayerId: string) {
+    const nextRows = createEmptyRows();
+    const nextTurn = createEmptyTurn();
+
+    syncLatestState({
+      rows: nextRows,
+      penalties: 0,
+      turn: nextTurn,
+      gamePlayers: nextPlayers,
+      currentPlayerIndex: 0,
+      selectedPlayerId: nextSelectedPlayerId,
+    });
     setSelectedPlayerId(nextSelectedPlayerId);
     setGamePlayers(nextPlayers);
     setCurrentPlayerIndex(0);
-    setRows(createEmptyRows());
+    setRows(nextRows);
     setPenalties(0);
-    setTurn(createEmptyTurn());
+    setTurn(nextTurn);
     setGameOver(false);
     setGameOverReason(null);
     setUndoStack([]);
@@ -1344,6 +1378,12 @@ function App() {
     joinTransportRef.current?.close();
     hostTransportRef.current = null;
     joinTransportRef.current = null;
+    syncLatestState({
+      syncRole: null,
+      syncPhase: "idle",
+      syncHostPlayerId: null,
+      syncReadyPayloads: [],
+    });
     setSyncRole(null);
     setSyncPhase("idle");
     setSyncHostPlayerId(null);
@@ -1363,6 +1403,7 @@ function App() {
 
     const hostPlayer = { id: createId(), name };
     const roomId = createId();
+    const turnId = nextTurnId();
     const hostTransport = new SyncHostTransport({
       callbacks: {
         onMessage: handleHostMessage,
@@ -1381,8 +1422,15 @@ function App() {
     setSyncRole("host");
     setSyncPhase("hostLobby");
     setSyncHostPlayerId(hostPlayer.id);
-    setSyncTurnId(nextTurnId());
+    setSyncTurnId(turnId);
     setSyncReadyPayloads([]);
+    syncLatestState({
+      syncRole: "host",
+      syncPhase: "hostLobby",
+      syncHostPlayerId: hostPlayer.id,
+      syncTurnId: turnId,
+      syncReadyPayloads: [],
+    });
     resetPlayState([hostPlayer], hostPlayer.id);
     void createHostOffer();
   }
@@ -1413,15 +1461,16 @@ function App() {
     setSyncCameraMode(null);
     try {
       const joinedPlayer = await hostTransport.acceptAnswer(value);
-      setGamePlayers((currentPlayers) => {
-        if (currentPlayers.some((player) => player.id === joinedPlayer.id)) {
-          return currentPlayers;
-        }
+      const currentPlayers = latestRef.current.gamePlayers;
 
+      if (!currentPlayers.some((player) => player.id === joinedPlayer.id)) {
         const nextPlayers = [...currentPlayers, joinedPlayer];
-        hostTransport.broadcast({ type: "lobbyState", players: nextPlayers, hostPlayerId: syncHostPlayerIdRef.current });
-        return nextPlayers;
-      });
+
+        syncLatestState({ gamePlayers: nextPlayers });
+        setGamePlayers(nextPlayers);
+        hostTransport.broadcast({ type: "lobbyState", players: nextPlayers, hostPlayerId: latestRef.current.syncHostPlayerId });
+      }
+
       setSyncMessage(`${joinedPlayer.name} joined`);
       await createHostOffer();
     } catch (error) {
@@ -1452,13 +1501,22 @@ function App() {
       hostTransportRef.current = null;
       joinTransportRef.current = joinTransport;
       localStorage.removeItem(ACTIVE_GAME_KEY);
+      const turnId = nextTurnId();
+
       setMode("sync");
       setSyncRole("joiner");
       setSyncPhase("showAnswer");
       setSyncHostPlayerId(answer.hostPlayerId);
       setSyncAnswerText(answer.answerText);
-      setSyncTurnId(nextTurnId());
+      setSyncTurnId(turnId);
       setSyncReadyPayloads([]);
+      syncLatestState({
+        syncRole: "joiner",
+        syncPhase: "showAnswer",
+        syncHostPlayerId: answer.hostPlayerId,
+        syncTurnId: turnId,
+        syncReadyPayloads: [],
+      });
       resetPlayState(
         [
           { id: answer.hostPlayerId, name: answer.hostName },
@@ -1473,11 +1531,11 @@ function App() {
     }
   }
 
-  function broadcastLobbyState(nextPlayers = gamePlayersRef.current) {
+  function broadcastLobbyState(nextPlayers = latestRef.current.gamePlayers) {
     hostTransportRef.current?.broadcast({
       type: "lobbyState",
       players: nextPlayers,
-      hostPlayerId: syncHostPlayerIdRef.current,
+      hostPlayerId: latestRef.current.syncHostPlayerId,
     });
   }
 
@@ -1505,12 +1563,14 @@ function App() {
   function handleJoinerMessage(_playerId: string, message: SyncWireMessage) {
     if (message.type === "lobbyState") {
       const nextPlayers = normalizePlayers(message.players);
-      const hostId = typeof message.hostPlayerId === "string" ? message.hostPlayerId : syncHostPlayerId;
+      const hostId = typeof message.hostPlayerId === "string" ? message.hostPlayerId : latestRef.current.syncHostPlayerId;
 
       if (nextPlayers.length > 0) {
+        syncLatestState({ gamePlayers: nextPlayers });
         setGamePlayers(nextPlayers);
       }
 
+      syncLatestState({ syncHostPlayerId: hostId, syncPhase: "lobby" });
       setSyncHostPlayerId(hostId);
       setSyncPhase("lobby");
       return;
@@ -1524,30 +1584,21 @@ function App() {
         return;
       }
 
-      setMode("sync");
-      setPage("play");
-      setGamePlayers(nextPlayers);
-      setCurrentPlayerIndex(0);
-      setRows(createEmptyRows());
-      setPenalties(0);
-      setTurn(createEmptyTurn());
-      setGameOver(false);
-      setGameOverReason(null);
-      setSyncTurnId(turnId);
-      setSyncReadyPayloads([]);
-      setSyncPhase("turn");
-      setRollAnimationKey(0);
+      startSyncedPlay(nextPlayers, turnId);
       return;
     }
 
     if (message.type === "rollResult") {
       const roll = normalizeRoll(message.roll);
 
-      if (!roll || message.turnId !== syncTurnIdRef.current) {
+      if (!roll || message.turnId !== latestRef.current.syncTurnId) {
         return;
       }
 
-      setTurn((currentTurn) => ({ ...createEmptyTurn(), roll, history: currentTurn.history }));
+      const nextTurn = { ...createEmptyTurn(), roll, history: latestRef.current.turn.history };
+
+      syncLatestState({ turn: nextTurn });
+      setTurn(nextTurn);
       setRollAnimationKey((key) => key + 1);
       return;
     }
@@ -1556,9 +1607,11 @@ function App() {
       const payloads = Array.isArray(message.payloads)
         ? message.payloads.map(normalizeReadyPayload).filter((payload): payload is SyncReadyPayload => Boolean(payload))
         : [];
+      const nextPhase = message.phase === "readyToAdvance" ? "readyToAdvance" : "turn";
 
+      syncLatestState({ syncReadyPayloads: payloads, syncPhase: nextPhase });
       setSyncReadyPayloads(payloads);
-      setSyncPhase(message.phase === "readyToAdvance" ? "readyToAdvance" : "turn");
+      setSyncPhase(nextPhase);
       return;
     }
 
@@ -1570,13 +1623,14 @@ function App() {
     if (message.type === "playerRemoved") {
       const playerId = typeof message.playerId === "string" ? message.playerId : "";
 
-      if (playerId === selectedPlayerIdRef.current) {
+      if (playerId === latestRef.current.selectedPlayerId) {
         endSyncSession("Removed");
         return;
       }
 
       const nextPlayers = normalizePlayers(message.players);
       if (nextPlayers.length > 0) {
+        syncLatestState({ gamePlayers: nextPlayers });
         setGamePlayers(nextPlayers);
       }
 
@@ -1589,7 +1643,7 @@ function App() {
     if (message.type === "hostStartOver") {
       const nextPlayers = normalizePlayers(message.players);
       const turnId = typeof message.turnId === "string" ? message.turnId : nextTurnId();
-      startSyncedPlay(nextPlayers.length > 0 ? nextPlayers : gamePlayersRef.current, turnId);
+      startSyncedPlay(nextPlayers.length > 0 ? nextPlayers : latestRef.current.gamePlayers, turnId);
       return;
     }
 
@@ -1599,7 +1653,7 @@ function App() {
   }
 
   function handleHostPeerClosed(playerId: string) {
-    if (syncRoleRef.current !== "host") {
+    if (latestRef.current.syncRole !== "host") {
       return;
     }
 
@@ -1607,13 +1661,26 @@ function App() {
   }
 
   function startSyncedPlay(nextPlayers: Player[], turnId: string) {
+    const nextRows = createEmptyRows();
+    const nextTurn = createEmptyTurn();
+
+    syncLatestState({
+      rows: nextRows,
+      penalties: 0,
+      turn: nextTurn,
+      gamePlayers: nextPlayers,
+      currentPlayerIndex: 0,
+      syncTurnId: turnId,
+      syncPhase: "turn",
+      syncReadyPayloads: [],
+    });
     setMode("sync");
     setPage("play");
     setGamePlayers(nextPlayers);
     setCurrentPlayerIndex(0);
-    setRows(createEmptyRows());
+    setRows(nextRows);
     setPenalties(0);
-    setTurn(createEmptyTurn());
+    setTurn(nextTurn);
     setGameOver(false);
     setGameOverReason(null);
     setUndoStack([]);
@@ -1639,26 +1706,28 @@ function App() {
   }
 
   function handleSyncRollRequest(playerId: string, message: SyncWireMessage) {
-    const currentPlayers = gamePlayersRef.current;
-    const currentPlayer = currentPlayers[currentPlayerIndexRef.current];
+    const latest = latestRef.current;
+    const currentPlayer = latest.gamePlayers[latest.currentPlayerIndex];
 
     if (
-      syncPhaseRef.current !== "turn" ||
+      latest.syncPhase !== "turn" ||
       !currentPlayer ||
       currentPlayer.id !== playerId ||
-      message.turnId !== syncTurnIdRef.current ||
-      turnRef.current.roll
+      message.turnId !== latest.syncTurnId ||
+      latest.turn.roll
     ) {
       return;
     }
 
-    const roll = rollDice(rowsRef.current);
+    const roll = rollDice(latest.rows);
+    const nextTurn = { ...latest.turn, roll };
 
-    setTurn((currentTurn) => ({ ...currentTurn, roll }));
+    syncLatestState({ turn: nextTurn });
+    setTurn(nextTurn);
     setRollAnimationKey((key) => key + 1);
     hostTransportRef.current?.broadcast({
       type: "rollResult",
-      turnId: syncTurnIdRef.current,
+      turnId: latest.syncTurnId,
       roll,
     });
   }
@@ -1681,18 +1750,19 @@ function App() {
   }
 
   function setHostReadyPayloads(nextPayloads: SyncReadyPayload[]) {
-    const currentPlayers = gamePlayersRef.current;
+    const latest = latestRef.current;
+    const currentPlayers = latest.gamePlayers;
     const activePayloads = nextPayloads.filter((payload) =>
       currentPlayers.some((player) => player.id === payload.playerId),
     );
     const allReady =
       currentPlayers.length > 0 &&
       currentPlayers.every((player) =>
-        activePayloads.some((payload) => payload.playerId === player.id && payload.turnId === syncTurnIdRef.current),
+        activePayloads.some((payload) => payload.playerId === player.id && payload.turnId === latest.syncTurnId),
       );
     const nextPhase: SyncPhase = allReady ? "readyToAdvance" : "turn";
 
-    syncReadyPayloadsRef.current = activePayloads;
+    syncLatestState({ syncReadyPayloads: activePayloads, syncPhase: nextPhase });
     setSyncReadyPayloads(activePayloads);
     setSyncPhase(nextPhase);
     hostTransportRef.current?.broadcast({
@@ -1705,12 +1775,12 @@ function App() {
   function handleSyncReadyMessage(value: unknown) {
     const payload = normalizeReadyPayload(value);
 
-    if (!payload || payload.turnId !== syncTurnIdRef.current) {
+    if (!payload || payload.turnId !== latestRef.current.syncTurnId) {
       return;
     }
 
     setHostReadyPayloads([
-      ...syncReadyPayloadsRef.current.filter((currentPayload) => currentPayload.playerId !== payload.playerId),
+      ...latestRef.current.syncReadyPayloads.filter((currentPayload) => currentPayload.playerId !== payload.playerId),
       payload,
     ]);
   }
@@ -1724,16 +1794,19 @@ function App() {
 
     if (isHost) {
       setHostReadyPayloads([
-        ...syncReadyPayloadsRef.current.filter((currentPayload) => currentPayload.playerId !== selectedPlayerId),
+        ...latestRef.current.syncReadyPayloads.filter((currentPayload) => currentPayload.playerId !== selectedPlayerId),
         payload,
       ]);
       return;
     }
 
-    setSyncReadyPayloads((currentPayloads) => [
-      ...currentPayloads.filter((currentPayload) => currentPayload.playerId !== selectedPlayerId),
+    const nextPayloads = [
+      ...latestRef.current.syncReadyPayloads.filter((currentPayload) => currentPayload.playerId !== selectedPlayerId),
       payload,
-    ]);
+    ];
+
+    syncLatestState({ syncReadyPayloads: nextPayloads });
+    setSyncReadyPayloads(nextPayloads);
     joinTransportRef.current?.send({
       type: "ready",
       payload,
@@ -1741,23 +1814,37 @@ function App() {
   }
 
   function applySyncAdvanceResult(message: SyncWireMessage) {
+    const latest = latestRef.current;
     const closedRows = Array.isArray(message.closedRows) ? uniqueRows(message.closedRows.filter(isRowColor)) : [];
     const nextPlayers = normalizePlayers(message.players);
     const nextIndex = Number(message.currentPlayerIndex);
     const nextTurn = typeof message.nextTurnId === "string" ? message.nextTurnId : nextTurnId();
     const nextGameOver = message.gameOver === true;
     const nextReason = normalizeGameOverReason(message.gameOverReason);
-    const committed = commitLocalTurnState(rowsRef.current, penalties, turnRef.current);
+    const committed = commitLocalTurnState(latest.rows, latest.penalties, latest.turn);
     const withGlobalClosures = applyGlobalClosedRows(committed.rows, closedRows);
     const localReason = committed.penalties >= MAX_PENALTIES ? "ownPenalties" : nextReason;
+    const nextGamePlayers = nextPlayers.length > 0 ? nextPlayers : latest.gamePlayers;
+    const nextCurrentPlayerIndex = Number.isInteger(nextIndex) ? nextIndex : 0;
+    const nextEmptyTurn = createEmptyTurn();
 
+    syncLatestState({
+      rows: withGlobalClosures,
+      penalties: committed.penalties,
+      turn: nextEmptyTurn,
+      gamePlayers: nextGamePlayers,
+      currentPlayerIndex: nextCurrentPlayerIndex,
+      syncTurnId: nextTurn,
+      syncReadyPayloads: [],
+      syncPhase: nextGameOver ? "gameOver" : "turn",
+    });
     setRows(withGlobalClosures);
     setPenalties(committed.penalties);
     setGameOver(nextGameOver);
     setGameOverReason(localReason);
-    setGamePlayers(nextPlayers.length > 0 ? nextPlayers : gamePlayersRef.current);
-    setCurrentPlayerIndex(Number.isInteger(nextIndex) ? nextIndex : 0);
-    setTurn(createEmptyTurn());
+    setGamePlayers(nextGamePlayers);
+    setCurrentPlayerIndex(nextCurrentPlayerIndex);
+    setTurn(nextEmptyTurn);
     setSyncTurnId(nextTurn);
     setSyncReadyPayloads([]);
     setSyncPhase(nextGameOver ? "gameOver" : "turn");
@@ -1782,13 +1869,23 @@ function App() {
     const nextReason = rowPenaltyState.gameOverReason;
     const nextIndex = nextGameOver ? currentPlayerIndex : (currentPlayerIndex + 1) % gamePlayers.length;
     const nextTurn = nextTurnId();
+    const nextEmptyTurn = createEmptyTurn();
 
+    syncLatestState({
+      rows: withGlobalClosures,
+      penalties: committed.penalties,
+      turn: nextEmptyTurn,
+      currentPlayerIndex: nextIndex,
+      syncTurnId: nextTurn,
+      syncReadyPayloads: [],
+      syncPhase: nextGameOver ? "gameOver" : "turn",
+    });
     setRows(withGlobalClosures);
     setPenalties(committed.penalties);
     setGameOver(nextGameOver);
     setGameOverReason(nextReason);
     setCurrentPlayerIndex(nextIndex);
-    setTurn(createEmptyTurn());
+    setTurn(nextEmptyTurn);
     setSyncTurnId(nextTurn);
     setSyncReadyPayloads([]);
     setSyncPhase(nextGameOver ? "gameOver" : "turn");
@@ -1805,8 +1902,17 @@ function App() {
   }
 
   function discardSyncTurn(turnId: string, nextIndex: number) {
+    const nextTurn = createEmptyTurn();
+
+    syncLatestState({
+      currentPlayerIndex: nextIndex,
+      turn: nextTurn,
+      syncTurnId: turnId,
+      syncReadyPayloads: [],
+      syncPhase: "turn",
+    });
     setCurrentPlayerIndex(nextIndex);
-    setTurn(createEmptyTurn());
+    setTurn(nextTurn);
     setSyncTurnId(turnId);
     setSyncReadyPayloads([]);
     setSyncPhase("turn");
@@ -1814,18 +1920,20 @@ function App() {
   }
 
   function removeSyncPlayer(playerId: string) {
-    if (syncRoleRef.current !== "host" || !playerId) {
+    const latest = latestRef.current;
+
+    if (latest.syncRole !== "host" || !playerId) {
       return;
     }
 
-    const currentPlayers = gamePlayersRef.current;
+    const currentPlayers = latest.gamePlayers;
     const removedIndex = currentPlayers.findIndex((player) => player.id === playerId);
 
     if (removedIndex < 0) {
       return;
     }
 
-    const currentPlayer = currentPlayers[currentPlayerIndexRef.current];
+    const currentPlayer = currentPlayers[latest.currentPlayerIndex];
     const nextPlayers = currentPlayers.filter((player) => player.id !== playerId);
 
     if (nextPlayers.length === 0) {
@@ -1837,21 +1945,19 @@ function App() {
 
     const currentPlayerRemoved = currentPlayer?.id === playerId;
     const nextIndex = currentPlayerRemoved
-      ? currentPlayerIndexRef.current % nextPlayers.length
-      : Math.max(0, currentPlayerIndexRef.current - (removedIndex < currentPlayerIndexRef.current ? 1 : 0));
-    const nextTurn = currentPlayerRemoved ? nextTurnId() : syncTurnIdRef.current;
+      ? latest.currentPlayerIndex % nextPlayers.length
+      : Math.max(0, latest.currentPlayerIndex - (removedIndex < latest.currentPlayerIndex ? 1 : 0));
+    const nextTurn = currentPlayerRemoved ? nextTurnId() : latest.syncTurnId;
 
-    gamePlayersRef.current = nextPlayers;
-    currentPlayerIndexRef.current = nextIndex;
+    syncLatestState({ gamePlayers: nextPlayers, currentPlayerIndex: nextIndex });
     hostTransportRef.current?.removePeer(playerId);
     setGamePlayers(nextPlayers);
     setCurrentPlayerIndex(nextIndex);
-    setSyncReadyPayloads((payloads) => payloads.filter((payload) => payload.playerId !== playerId));
 
     if (currentPlayerRemoved) {
       discardSyncTurn(nextTurn, nextIndex);
     } else {
-      setHostReadyPayloads(syncReadyPayloadsRef.current.filter((payload) => payload.playerId !== playerId));
+      setHostReadyPayloads(latestRef.current.syncReadyPayloads.filter((payload) => payload.playerId !== playerId));
     }
 
     hostTransportRef.current?.broadcast({
@@ -1865,16 +1971,28 @@ function App() {
   }
 
   function endSyncSession(message: string) {
+    const nextRows = createEmptyRows();
+    const nextTurn = createEmptyTurn();
+
     resetSyncRuntime();
     localStorage.removeItem(ACTIVE_GAME_KEY);
+    syncLatestState({
+      rows: nextRows,
+      penalties: 0,
+      turn: nextTurn,
+      gamePlayers: [],
+      currentPlayerIndex: 0,
+      syncReadyPayloads: [],
+      syncPhase: "idle",
+    });
     setMode("sync");
     setPage("home");
     setHomeTab("sync");
     setGamePlayers([]);
     setCurrentPlayerIndex(0);
-    setRows(createEmptyRows());
+    setRows(nextRows);
     setPenalties(0);
-    setTurn(createEmptyTurn());
+    setTurn(nextTurn);
     setGameOver(false);
     setGameOverReason(null);
     setUndoStack([]);
@@ -1930,11 +2048,21 @@ function App() {
     setConfirmAction(null);
     setPage("home");
     setMode("local");
+    const nextRows = createEmptyRows();
+    const nextTurn = createEmptyTurn();
+
+    syncLatestState({
+      rows: nextRows,
+      penalties: 0,
+      turn: nextTurn,
+      gamePlayers: [],
+      currentPlayerIndex: 0,
+    });
     setGamePlayers([]);
     setCurrentPlayerIndex(0);
-    setRows(createEmptyRows());
+    setRows(nextRows);
     setPenalties(0);
-    setTurn(createEmptyTurn());
+    setTurn(nextTurn);
     setGameOver(false);
     setGameOverReason(null);
     setUndoStack([]);
@@ -2349,22 +2477,24 @@ function App() {
                   syncMessage={syncMessage}
                   onCreateOffer={createHostOffer}
                   onRandomize={() => {
-                    setGamePlayers((currentPlayers) => {
-                      const nextPlayers = shufflePlayers(currentPlayers);
-                      broadcastLobbyState(nextPlayers);
-                      return nextPlayers;
-                    });
+                    const nextPlayers = shufflePlayers(latestRef.current.gamePlayers);
+
+                    syncLatestState({ gamePlayers: nextPlayers });
+                    setGamePlayers(nextPlayers);
+                    broadcastLobbyState(nextPlayers);
                   }}
                   onMove={(fromIndex, toIndex) => {
-                    setGamePlayers((currentPlayers) => {
-                      if (toIndex < 0 || toIndex >= currentPlayers.length) {
-                        return currentPlayers;
-                      }
+                    const currentPlayers = latestRef.current.gamePlayers;
 
-                      const nextPlayers = moveItem(currentPlayers, fromIndex, toIndex);
-                      broadcastLobbyState(nextPlayers);
-                      return nextPlayers;
-                    });
+                    if (toIndex < 0 || toIndex >= currentPlayers.length) {
+                      return;
+                    }
+
+                    const nextPlayers = moveItem(currentPlayers, fromIndex, toIndex);
+
+                    syncLatestState({ gamePlayers: nextPlayers });
+                    setGamePlayers(nextPlayers);
+                    broadcastLobbyState(nextPlayers);
                   }}
                   onRemove={removeSyncPlayer}
                   onScanAnswer={() => setSyncCameraMode("answer")}

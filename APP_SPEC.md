@@ -186,6 +186,12 @@ Player-to-host events include:
 
 The host should be the source of truth for dice results. When the current player taps the dice in sync mode, that device sends a roll request to the host. The host validates that the request came from the current active player for the current `turnId`, generates the roll for the currently visible dice, and broadcasts the roll result to everyone.
 
+### Sync Callback State
+
+WebRTC callbacks are long-lived and must not read mutable play state from stale React closures.
+
+Any sync callback that needs current play state should read from the latest-state snapshot. This snapshot must include rows, penalties, staged turn state, players, current player index, turn id, phase, role, ready payloads, host id, and selected player id.
+
 ### Sync Phases
 
 Sync mode has explicit shared phases:
