@@ -729,7 +729,7 @@ button:focus-visible {
   --score-lock-size: 34px;
   --score-row-gap: 4px;
   --score-row-padding: 5px;
-  --score-divider-offset: -2px;
+  --score-divider-offset: -2.5px;
 }
 
 .score-final-divider {
@@ -850,7 +850,7 @@ button:focus-visible {
   --score-lock-size: 30px;
   --score-row-gap: 3px;
   --score-row-padding: 4px;
-  --score-divider-offset: -1.5px;
+  --score-divider-offset: -2px;
 }
 
 .score-card-preview .score-tile,
@@ -1284,7 +1284,7 @@ button:focus-visible {
     --score-lock-size: 28px;
     --score-row-gap: 3px;
     --score-row-padding: 4px;
-    --score-divider-offset: -1.5px;
+    --score-divider-offset: -2px;
   }
 
   .score-tile,
@@ -1339,7 +1339,7 @@ button:focus-visible {
   .score-rows {
     --score-lock-size: 26px;
     --score-row-gap: 2px;
-    --score-divider-offset: -1px;
+    --score-divider-offset: -1.5px;
   }
 
   .score-tile,
