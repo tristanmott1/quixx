@@ -338,16 +338,30 @@ The legal options hint toggle:
 
 - Shows or hides score-card legal-move hints.
 - Defaults to off.
+- Is visible to every player in both local and sync mode.
+- Affects only the current device.
 - Persists locally in local mode.
-- Is controlled by the host in sync mode.
-- Applies to every connected player in sync mode.
-- Is visible only to the host during synced play.
+- Persists locally as the player's personal preference in sync mode when no host lock is active.
+- Does not broadcast normal personal hint changes to other players.
+- In sync mode, can be disabled by the host's shared hint lock-off control.
+
+The sync host also has a separate hint lock-off control:
+
+- Visible only to the host during synced play.
+- Separate from the normal eye / eye-off personal hint toggle.
+- When enabled, forces hints off on every connected device.
+- When enabled, disables every player's normal personal hint toggle.
+- When disabled, leaves every player's hints off.
+- When disabled, re-enables every player's normal personal hint toggle.
+- Does not remember or restore previous personal hint states.
+- Broadcasts only the shared lock state, not personal hint preferences.
 
 Controls should use icons whenever possible:
 
 - Exit can use an X or back-style icon.
 - Start over can use a rotate/reset icon.
 - Legal options hint toggle should use an eye / eye-off icon and may omit visible text.
+- Sync host hint lock-off should use a distinct lock-style icon and may omit visible text.
 
 Use aria labels for icon-only controls.
 
@@ -355,7 +369,8 @@ Top action layout:
 
 - Exit is in the left corner.
 - Start over is in the right corner.
-- The legal options hint toggle is immediately to the right of Start over in the top-right action group.
+- The personal legal options hint toggle is in the top-right action group.
+- In sync mode, the host-only hint lock-off control is also in the top-right action group.
 - Undo and Next do not live in the top action bar.
 
 Because Exit and Start over cannot be undone:
@@ -558,9 +573,15 @@ At every point in the selection stage:
 Legal-move visual hints are controlled by the legal options hint toggle:
 
 - The default is off.
-- The preference persists locally in local mode.
-- In sync mode, the host's current hint setting is sent at game start and start over.
-- In sync mode, host hint changes are broadcast immediately.
+- The personal preference persists locally.
+- In sync mode, each player's personal hint setting is private to that device.
+- In sync mode, normal personal hint changes are not sent to the host or other players.
+- In sync mode, the host can broadcast a shared lock-off override.
+- When the shared lock-off override is active, all devices immediately set hints off.
+- When the shared lock-off override is active, personal hint toggles are disabled for every player.
+- When the shared lock-off override is released, hints remain off for every player.
+- When the shared lock-off override is released, personal hint toggles become usable again.
+- The app should not store previous personal hint states for restoration after the lock is released.
 - Hints affect only visual treatment, not whether a control is enabled.
 - When hints are off, legal score-card tiles look completely normal but remain clickable.
 - When hints are on, legal white-sum score-card options use a bright white tile treatment.

@@ -115,7 +115,17 @@ async function runSourceChecks() {
   assert(transportSource.includes("parseWireMessage"), "Data-channel message parsing has its own parser.");
   assert(!appSource.includes("sync-play-strip"), "Sync play has no duplicate Ready-count strip.");
   assert(!styleSource.includes(".sync-play-strip"), "Duplicate Ready-count strip styles are removed.");
-  assert(appSource.includes("hintsChanged"), "Sync hint changes are broadcast to connected players.");
+  assert(!appSource.includes("hintsChanged"), "Personal sync hint changes are not broadcast.");
+  assert(appSource.includes("hintsLockChanged"), "Host hint lock changes are broadcast to connected players.");
+  assert(appSource.includes("syncHintsLockedOff"), "Sync hint lock state is separate from personal hint state.");
+  assert(
+    appSource.includes('disabled={mode === "sync" && syncHintsLockedOff}'),
+    "Personal hint toggle stays visible and is only disabled by the sync hint lock.",
+  );
+  assert(
+    appSource.includes('aria-label={syncHintsLockedOff ? "Unlock legal options" : "Lock legal options off"}'),
+    "Host hint lock has its own control separate from the personal eye.",
+  );
   assert(appSource.includes("closedBy"), "Sync advance carries row-closure player metadata.");
   assert(appSource.includes("penaltyPlayerIds"), "Sync advance carries 4-penalty player metadata.");
   assert(appSource.includes("isAcceptingAnswer"), "Host answer acceptance is explicitly gated.");
@@ -356,7 +366,15 @@ async function runSyncHostChecks(page) {
   assert((await page.locator(".sync-play-strip").count()) === 0, "Sync play does not show a duplicate Ready-count strip.");
   assert((await page.locator(".sync-player-status.waiting").count()) === 1, "Sync compact player row shows waiting status.");
   assert((await page.locator(".sync-player-status.ready").count()) === 0, "Sync compact player row starts unready.");
-  assert((await page.getByRole("button", { name: "Show legal options" }).count()) === 1, "Sync host shows the hint toggle.");
+  assert((await page.getByRole("button", { name: "Show legal options" }).count()) === 1, "Sync host shows the personal hint toggle.");
+  assert((await page.getByRole("button", { name: "Lock legal options off" }).count()) === 1, "Sync host shows the hint lock control.");
+  await page.getByRole("button", { name: "Show legal options" }).click();
+  assert((await page.getByRole("button", { name: "Hide legal options" }).count()) === 1, "Sync personal hints can be enabled locally.");
+  await page.getByRole("button", { name: "Lock legal options off" }).click();
+  assert(await page.getByRole("button", { name: "Legal options locked off" }).isDisabled(), "Sync hint lock disables the personal hint toggle.");
+  assert((await page.getByRole("button", { name: "Unlock legal options" }).count()) === 1, "Sync host can release the hint lock.");
+  await page.getByRole("button", { name: "Unlock legal options" }).click();
+  assert((await page.getByRole("button", { name: "Show legal options" }).count()) === 1, "Unlock leaves personal hints off and usable.");
   assert((await page.getByRole("button", { name: "Opponent reached four penalties" }).count()) === 0, "Sync play hides opponent 4x control.");
   assert(await page.getByRole("button", { name: "Ready" }).isDisabled(), "Sync Ready starts disabled before rolling.");
 

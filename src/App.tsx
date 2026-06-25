@@ -15,6 +15,7 @@ import {
   Star,
   Trash2,
   Undo2,
+  Unlock,
   Wifi,
   X,
 } from "lucide-react";
@@ -141,6 +142,7 @@ type LatestSyncState = {
   syncHostPlayerId: string | null;
   selectedPlayerId: string | null;
   showHints: boolean;
+  syncHintsLockedOff: boolean;
 };
 
 type PlayStatePatch = {
@@ -157,6 +159,7 @@ type PlayStatePatch = {
   syncPhase?: SyncPhase;
   selectedPlayerId?: string | null;
   showHints?: boolean;
+  syncHintsLockedOff?: boolean;
   rollAnimationKey?: number;
 };
 
@@ -1121,6 +1124,7 @@ function App() {
   );
   const [undoStack, setUndoStack] = useState<GameSnapshot[]>(savedGame?.undoStack ?? []);
   const [showHints, setShowHints] = useState(readStoredShowHints);
+  const [syncHintsLockedOff, setSyncHintsLockedOff] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"rollUndo" | "exit" | "startOver" | null>(null);
   const [draggingPlayerId, setDraggingPlayerId] = useState<string | null>(null);
   const [rollAnimationKey, setRollAnimationKey] = useState(0);
@@ -1141,6 +1145,7 @@ function App() {
     syncHostPlayerId,
     selectedPlayerId,
     showHints,
+    syncHintsLockedOff,
   });
 
   const selectedPlayerExists = selectedPlayerId ? players.some((player) => player.id === selectedPlayerId) : false;
@@ -1229,6 +1234,10 @@ function App() {
       latestUpdates.showHints = patch.showHints;
     }
 
+    if ("syncHintsLockedOff" in patch && typeof patch.syncHintsLockedOff === "boolean") {
+      latestUpdates.syncHintsLockedOff = patch.syncHintsLockedOff;
+    }
+
     if (Object.keys(latestUpdates).length > 0) {
       syncLatestState(latestUpdates);
     }
@@ -1283,6 +1292,10 @@ function App() {
 
     if ("showHints" in patch && typeof patch.showHints === "boolean") {
       setShowHints(patch.showHints);
+    }
+
+    if ("syncHintsLockedOff" in patch && typeof patch.syncHintsLockedOff === "boolean") {
+      setSyncHintsLockedOff(patch.syncHintsLockedOff);
     }
 
     if ("rollAnimationKey" in patch && typeof patch.rollAnimationKey === "number") {
@@ -1395,6 +1408,7 @@ function App() {
       syncHostPlayerId,
       selectedPlayerId,
       showHints,
+      syncHintsLockedOff,
     };
   }, [
     rows,
@@ -1409,6 +1423,7 @@ function App() {
     syncHostPlayerId,
     selectedPlayerId,
     showHints,
+    syncHintsLockedOff,
   ]);
 
   useEffect(() => () => {
@@ -1511,9 +1526,11 @@ function App() {
     syncLatestState({
       syncRole: null,
       syncHostPlayerId: null,
+      syncHintsLockedOff: false,
     });
     setMode("local");
     setSyncRole(null);
+    setSyncHintsLockedOff(false);
     setSyncQrText("");
     setSyncAnswerText("");
     setSyncCameraMode(null);
@@ -1531,6 +1548,7 @@ function App() {
       undoStack: game.undoStack,
       syncReadyPayloads: [],
       syncPhase: "idle",
+      syncHintsLockedOff: false,
       selectedPlayerId: nextSelectedPlayerId,
       rollAnimationKey: 0,
     });
@@ -1565,11 +1583,13 @@ function App() {
       syncPhase: "idle",
       syncHostPlayerId: null,
       syncReadyPayloads: [],
+      syncHintsLockedOff: false,
     });
     setSyncRole(null);
     setSyncPhase("idle");
     setSyncHostPlayerId(null);
     setSyncReadyPayloads([]);
+    setSyncHintsLockedOff(false);
     setSyncQrText("");
     setSyncAnswerText("");
     setSyncCameraMode(null);
@@ -1614,6 +1634,7 @@ function App() {
       syncHostPlayerId: hostPlayer.id,
       syncTurnId: turnId,
       syncReadyPayloads: [],
+      syncHintsLockedOff: false,
     });
     resetPlayState([hostPlayer], hostPlayer.id);
     void createHostOffer();
@@ -1716,6 +1737,7 @@ function App() {
         syncHostPlayerId: answer.hostPlayerId,
         syncTurnId: turnId,
         syncReadyPayloads: [],
+        syncHintsLockedOff: false,
       });
       resetPlayState(
         [
@@ -1779,13 +1801,13 @@ function App() {
     if (message.type === "gameStart") {
       const nextPlayers = normalizePlayers(message.players);
       const turnId = typeof message.turnId === "string" ? message.turnId : nextTurnId();
-      const nextShowHints = typeof message.showHints === "boolean" ? message.showHints : latestRef.current.showHints;
+      const nextHintsLockedOff = message.hintsLockedOff === true;
 
       if (nextPlayers.length === 0) {
         return;
       }
 
-      startSyncedPlay(nextPlayers, turnId, nextShowHints);
+      startSyncedPlay(nextPlayers, turnId, nextHintsLockedOff);
       return;
     }
 
@@ -1815,10 +1837,9 @@ function App() {
       return;
     }
 
-    if (message.type === "hintsChanged") {
-      if (typeof message.showHints === "boolean") {
-        syncLatestState({ showHints: message.showHints });
-        setShowHints(message.showHints);
+    if (message.type === "hintsLockChanged") {
+      if (typeof message.locked === "boolean") {
+        applySyncHintsLock(message.locked);
       }
       return;
     }
@@ -1851,9 +1872,9 @@ function App() {
     if (message.type === "hostStartOver") {
       const nextPlayers = normalizePlayers(message.players);
       const turnId = typeof message.turnId === "string" ? message.turnId : nextTurnId();
-      const nextShowHints = typeof message.showHints === "boolean" ? message.showHints : latestRef.current.showHints;
+      const nextHintsLockedOff = message.hintsLockedOff === true;
 
-      startSyncedPlay(nextPlayers.length > 0 ? nextPlayers : latestRef.current.gamePlayers, turnId, nextShowHints);
+      startSyncedPlay(nextPlayers.length > 0 ? nextPlayers : latestRef.current.gamePlayers, turnId, nextHintsLockedOff);
       return;
     }
 
@@ -1870,9 +1891,10 @@ function App() {
     removeSyncPlayer(playerId);
   }
 
-  function startSyncedPlay(nextPlayers: Player[], turnId: string, nextShowHints = showHints) {
+  function startSyncedPlay(nextPlayers: Player[], turnId: string, nextHintsLockedOff = syncHintsLockedOff) {
     const nextRows = createEmptyRows();
     const nextTurn = createEmptyTurn();
+    const nextShowHints = nextHintsLockedOff ? false : latestRef.current.showHints;
 
     clearSyncAdvanceFeedback();
     applyPlayState({
@@ -1888,6 +1910,7 @@ function App() {
       syncPhase: "turn",
       syncReadyPayloads: [],
       showHints: nextShowHints,
+      syncHintsLockedOff: nextHintsLockedOff,
       rollAnimationKey: 0,
     });
     setMode("sync");
@@ -1905,7 +1928,7 @@ function App() {
     hostTransportRef.current?.broadcast({
       type: "gameStart",
       players: gamePlayers,
-      showHints,
+      hintsLockedOff: syncHintsLockedOff,
       turnId,
     });
   }
@@ -2207,17 +2230,32 @@ function App() {
   }
 
   function toggleShowHints() {
-    const nextShowHints = !showHints;
-
-    syncLatestState({ showHints: nextShowHints });
-    setShowHints(nextShowHints);
-
-    if (mode === "sync" && isHost) {
-      hostTransportRef.current?.broadcast({
-        type: "hintsChanged",
-        showHints: nextShowHints,
-      });
+    if (mode === "sync" && syncHintsLockedOff) {
+      return;
     }
+
+    applyPlayState({ showHints: !showHints });
+  }
+
+  function applySyncHintsLock(locked: boolean) {
+    applyPlayState({
+      showHints: false,
+      syncHintsLockedOff: locked,
+    });
+  }
+
+  function toggleSyncHintsLock() {
+    if (!isHost) {
+      return;
+    }
+
+    const nextLocked = !syncHintsLockedOff;
+
+    applySyncHintsLock(nextLocked);
+    hostTransportRef.current?.broadcast({
+      type: "hintsLockChanged",
+      locked: nextLocked,
+    });
   }
 
   function confirmStartOver() {
@@ -2230,11 +2268,11 @@ function App() {
     if (mode === "sync" && isHost) {
       const nextTurn = nextTurnId();
 
-      startSyncedPlay(gamePlayers, nextTurn, showHints);
+      startSyncedPlay(gamePlayers, nextTurn, syncHintsLockedOff);
       hostTransportRef.current?.broadcast({
         type: "hostStartOver",
+        hintsLockedOff: syncHintsLockedOff,
         players: gamePlayers,
-        showHints,
         turnId: nextTurn,
       });
       return;
@@ -2274,6 +2312,7 @@ function App() {
       gameOver: false,
       gameOverReason: null,
       undoStack: [],
+      syncHintsLockedOff: false,
       rollAnimationKey: 0,
     });
   }
@@ -2758,14 +2797,29 @@ function App() {
                     <RotateCcw size={19} />
                   </button>
                 ) : null}
-                {mode === "local" || isHost ? (
+                <button
+                  className={showHints ? "icon-action selected" : "icon-action"}
+                  type="button"
+                  onClick={toggleShowHints}
+                  disabled={mode === "sync" && syncHintsLockedOff}
+                  aria-label={
+                    syncHintsLockedOff
+                      ? "Legal options locked off"
+                      : showHints
+                        ? "Hide legal options"
+                        : "Show legal options"
+                  }
+                >
+                  {showHints ? <Eye size={19} /> : <EyeOff size={19} />}
+                </button>
+                {isHost ? (
                   <button
-                    className={showHints ? "icon-action selected" : "icon-action"}
+                    className={syncHintsLockedOff ? "icon-action selected" : "icon-action"}
                     type="button"
-                    onClick={toggleShowHints}
-                    aria-label={showHints ? "Hide legal options" : "Show legal options"}
+                    onClick={toggleSyncHintsLock}
+                    aria-label={syncHintsLockedOff ? "Unlock legal options" : "Lock legal options off"}
                   >
-                    {showHints ? <Eye size={19} /> : <EyeOff size={19} />}
+                    {syncHintsLockedOff ? <Lock size={19} /> : <Unlock size={19} />}
                   </button>
                 ) : null}
               </div>
@@ -2857,7 +2911,7 @@ function App() {
                   turn={turn}
                   legalMarkKeys={legalMarkKeys}
                   legalMarkRoles={legalMarkRoles}
-                  showHints={showHints}
+                  showHints={showHints && !(mode === "sync" && syncHintsLockedOff)}
                   canLock={mode === "local" && canStageOpponentLock(row, rows, turn, diceStageDone, gameOver)}
                   gameOver={gameOver}
                   onSelectMark={selectMark}
