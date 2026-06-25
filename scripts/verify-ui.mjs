@@ -88,28 +88,40 @@ function rowsState() {
   };
 }
 
-function activeGameForRoll(roll) {
+function activeGameForRoll(roll, overrides = {}) {
   const players = [
     { id: "alice", name: "Alice" },
     { id: "bob", name: "Bob" },
   ];
+  const emptyTurn = {
+    roll: null,
+    opponentWhiteSum: null,
+    selectedMarks: [],
+    penalty: false,
+    opponentLocks: [],
+  };
+  const history = roll ? [{ before: emptyTurn, kind: "roll" }] : [];
+  const turn = {
+    roll,
+    opponentWhiteSum: null,
+    selectedMarks: [],
+    penalty: false,
+    opponentLocks: [],
+    history,
+    ...overrides.turn,
+  };
 
   return {
     page: "play",
     players,
     selectedPlayerId: "alice",
-    currentPlayerIndex: 0,
-    rows: rowsState(),
-    penalties: 0,
-    turn: {
-      roll,
-      opponentWhiteSum: null,
-      selectedMarks: [],
-      penalty: false,
-      opponentLocks: [],
-    },
-    gameOver: false,
-    gameOverReason: null,
+    currentPlayerIndex: overrides.currentPlayerIndex ?? 0,
+    rows: overrides.rows ?? rowsState(),
+    penalties: overrides.penalties ?? 0,
+    turn,
+    gameOver: overrides.gameOver ?? false,
+    gameOverReason: overrides.gameOverReason ?? null,
+    undoStack: overrides.undoStack ?? [],
   };
 }
 
@@ -203,6 +215,58 @@ async function runAmbiguityChecks(page) {
     (await page.locator('button.score-tile.legal[aria-label="Red 8"]').count()) === 0,
     "Unambiguous mixed Red 7 does not allow a later white Red 8.",
   );
+
+  await setGame(page, activeGameForRoll({ whiteA: 4, whiteB: 4, red: 3, yellow: 1, green: 1, blue: 1 }));
+  await page.getByRole("button", { name: "Red 7" }).click();
+  assert(
+    (await page.locator('button.score-tile.legal[aria-label="Yellow 8"]').count()) === 1,
+    "Mixed-first in one row allows a later white mark in a different row.",
+  );
+  await page.getByRole("button", { name: "Yellow 8" }).click();
+  assert(!(await page.getByRole("button", { name: "Next" }).isDisabled()), "Mixed-first cross-row turn can complete.");
+}
+
+async function runCommittedUndoChecks(page) {
+  await setGame(page, activeGameForRoll({ whiteA: 3, whiteB: 4, red: 4, yellow: 1, green: 1, blue: 1 }));
+  await page.getByRole("button", { name: "Red 7" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: "White sum 6" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.reload();
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  assert((await page.getByRole("heading", { name: "Bob" }).count()) === 1, "Undoing Next restores the previous player.");
+  assert((await page.locator('button.sum-box.selected[aria-label="White sum 6"]').count()) === 1, "Undoing Next restores the opponent white sum.");
+  assert(!(await page.getByRole("button", { name: "Next" }).isDisabled()), "Undoing Next restores a turn ready for editing.");
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  assert((await page.locator(".sum-strip.needs-input").count()) === 1, "Undo priority clears the restored white sum before older turns.");
+  assert(await page.getByRole("button", { name: "Next" }).isDisabled(), "Clearing the restored white sum disables Next.");
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  assert((await page.getByRole("heading", { name: "Alice" }).count()) === 1, "Undo can continue to the earlier committed turn.");
+  assert((await page.locator('button.score-tile.selected[aria-label="Red 7"]').count()) === 1, "Earlier committed undo restores staged marks.");
+  assert(!(await page.getByRole("button", { name: "Next" }).isDisabled()), "Earlier committed undo restores another editable turn.");
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  assert((await page.locator('button.score-tile.selected[aria-label="Red 7"]').count()) === 0, "Turn undo removes the restored mark first.");
+  assert(await page.getByRole("button", { name: "Next" }).isDisabled(), "Removing the restored mark disables Next.");
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  await page.getByRole("dialog", { name: "Undo roll?" }).getByRole("button", { name: "Undo" }).click();
+  assert(await page.getByRole("button", { name: "Roll dice" }).isEnabled(), "Undo can reach the start of the game.");
+  assert(await page.getByRole("button", { name: "Undo" }).isDisabled(), "Undo is disabled at the start of the game.");
+}
+
+async function runGameOverUndoChecks(page) {
+  await setGame(page, activeGameForRoll({ whiteA: 3, whiteB: 4, red: 4, yellow: 1, green: 1, blue: 1 }, { penalties: 3 }));
+  await page.getByRole("button", { name: "Penalty" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
+  assert(await page.getByRole("button", { name: "Next" }).isDisabled(), "Game-ending Next disables Next.");
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  assert(!(await page.getByRole("button", { name: "Next" }).isDisabled()), "Undo restores a game-ending turn for editing.");
+  assert((await page.locator(".penalty-box.selected").count()) === 4, "Undo restores the staged fourth penalty.");
 }
 
 async function main() {
@@ -226,6 +290,8 @@ async function main() {
     const mobile = await browser.newPage({ deviceScaleFactor: 2, viewport: { width: 390, height: 844 } });
     await runFlowChecks(mobile);
     await runAmbiguityChecks(mobile);
+    await runCommittedUndoChecks(mobile);
+    await runGameOverUndoChecks(mobile);
 
     const desktop = await browser.newPage({ deviceScaleFactor: 1, viewport: { width: 900, height: 900 } });
     await setGame(desktop, activeGameForRoll({ whiteA: 3, whiteB: 4, red: 4, yellow: 2, green: 6, blue: 1 }));

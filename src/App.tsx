@@ -72,6 +72,17 @@ type TurnDraft = TurnCore & {
   history: UndoEntry[];
 };
 
+type GameOverReason = "rows" | "ownPenalties" | "opponentPenalties" | null;
+
+type GameSnapshot = {
+  currentPlayerIndex: number;
+  rows: RowsState;
+  penalties: number;
+  turn: TurnDraft;
+  gameOver: boolean;
+  gameOverReason: GameOverReason;
+};
+
 type ActiveGame = {
   page: "play";
   players: Player[];
@@ -81,7 +92,8 @@ type ActiveGame = {
   penalties: number;
   turn: TurnDraft;
   gameOver: boolean;
-  gameOverReason: "rows" | "ownPenalties" | "opponentPenalties" | null;
+  gameOverReason: GameOverReason;
+  undoStack: GameSnapshot[];
 };
 
 type RowConfig = {
@@ -175,6 +187,7 @@ function createFreshGame(players: Player[], selectedPlayerId: string): ActiveGam
     turn: createEmptyTurn(),
     gameOver: false,
     gameOverReason: null,
+    undoStack: [],
   };
 }
 
@@ -190,20 +203,10 @@ function uniqueRows(rows: RowColor[]) {
   return rows.filter((row, index) => rows.indexOf(row) === index);
 }
 
-function toTurnCore(turn: TurnDraft): TurnCore {
-  return {
-    roll: turn.roll,
-    opponentWhiteSum: turn.opponentWhiteSum,
-    selectedMarks: turn.selectedMarks,
-    penalty: turn.penalty,
-    opponentLocks: turn.opponentLocks,
-  };
-}
-
 function withUndoHistory(currentTurn: TurnDraft, nextTurn: TurnCore, kind: UndoKind): TurnDraft {
   return {
     ...nextTurn,
-    history: [...currentTurn.history, { before: toTurnCore(currentTurn), kind }],
+    history: [...currentTurn.history, { before: cloneTurnCore(currentTurn), kind }],
   };
 }
 
@@ -211,6 +214,53 @@ function restoreUndoEntry(turn: TurnDraft, entry: UndoEntry): TurnDraft {
   return {
     ...entry.before,
     history: turn.history.slice(0, -1),
+  };
+}
+
+function cloneRows(rows: RowsState): RowsState {
+  return {
+    red: { selected: [...rows.red.selected], lock: rows.red.lock },
+    yellow: { selected: [...rows.yellow.selected], lock: rows.yellow.lock },
+    green: { selected: [...rows.green.selected], lock: rows.green.lock },
+    blue: { selected: [...rows.blue.selected], lock: rows.blue.lock },
+  };
+}
+
+function cloneTurnCore(turn: TurnCore): TurnCore {
+  return {
+    roll: turn.roll ? { ...turn.roll } : null,
+    opponentWhiteSum: turn.opponentWhiteSum,
+    selectedMarks: turn.selectedMarks.map((mark) => ({ ...mark })),
+    penalty: turn.penalty,
+    opponentLocks: [...turn.opponentLocks],
+  };
+}
+
+function cloneTurn(turn: TurnDraft): TurnDraft {
+  return {
+    ...cloneTurnCore(turn),
+    history: turn.history.map((entry) => ({
+      before: cloneTurnCore(entry.before),
+      kind: entry.kind,
+    })),
+  };
+}
+
+function createGameSnapshot(
+  currentPlayerIndex: number,
+  rows: RowsState,
+  penalties: number,
+  turn: TurnDraft,
+  gameOver: boolean,
+  gameOverReason: GameOverReason,
+): GameSnapshot {
+  return {
+    currentPlayerIndex,
+    rows: cloneRows(rows),
+    penalties,
+    turn: cloneTurn(turn),
+    gameOver,
+    gameOverReason,
   };
 }
 
@@ -374,6 +424,33 @@ function normalizeTurn(value: unknown): TurnDraft {
   };
 }
 
+function normalizeGameOverReason(value: unknown): GameOverReason {
+  return value === "rows" || value === "ownPenalties" || value === "opponentPenalties" ? value : null;
+}
+
+function normalizeGameSnapshot(value: unknown, playerCount: number): GameSnapshot | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const snapshot = value as Partial<GameSnapshot>;
+  const currentPlayerIndex = Number(snapshot.currentPlayerIndex);
+  const penalties = Number(snapshot.penalties);
+
+  if (!Number.isInteger(currentPlayerIndex) || currentPlayerIndex < 0 || currentPlayerIndex >= playerCount) {
+    return null;
+  }
+
+  return {
+    currentPlayerIndex,
+    rows: normalizeRows(snapshot.rows),
+    penalties: Number.isInteger(penalties) ? Math.max(0, Math.min(MAX_PENALTIES, penalties)) : 0,
+    turn: normalizeTurn(snapshot.turn),
+    gameOver: snapshot.gameOver === true,
+    gameOverReason: normalizeGameOverReason(snapshot.gameOverReason),
+  };
+}
+
 function readStoredPlayers(): Player[] {
   try {
     return normalizePlayers(JSON.parse(localStorage.getItem(PLAYERS_KEY) ?? "[]"));
@@ -413,12 +490,7 @@ function readActiveGame(): ActiveGame | null {
     const selectedPlayerId = typeof game.selectedPlayerId === "string" ? game.selectedPlayerId : "";
     const currentPlayerIndex = Number(game.currentPlayerIndex);
     const penalties = Number(game.penalties);
-    const gameOverReason =
-      game.gameOverReason === "rows" ||
-      game.gameOverReason === "ownPenalties" ||
-      game.gameOverReason === "opponentPenalties"
-        ? game.gameOverReason
-        : null;
+    const gameOverReason = normalizeGameOverReason(game.gameOverReason);
 
     if (
       game.page !== "play" ||
@@ -441,6 +513,11 @@ function readActiveGame(): ActiveGame | null {
       turn: normalizeTurn(game.turn),
       gameOver: game.gameOver === true,
       gameOverReason,
+      undoStack: Array.isArray(game.undoStack)
+        ? game.undoStack
+            .map((snapshot) => normalizeGameSnapshot(snapshot, players.length))
+            .filter((snapshot): snapshot is GameSnapshot => Boolean(snapshot))
+        : [],
     };
   } catch {
     return null;
@@ -590,22 +667,40 @@ function getRolesForMark(mark: ScoreMark, whiteSum: number | null, mixedSums: Pa
   return roles;
 }
 
-function hasValidUserInterpretation(marks: ScoreMark[], turn: TurnDraft) {
+function isValidRoleOrder(whiteMark: ScoreMark, mixedMark: ScoreMark) {
+  // White must be visually first only when both marks live in the same row.
+  return whiteMark.row !== mixedMark.row || visualIndex(whiteMark.row, whiteMark.number) < visualIndex(mixedMark.row, mixedMark.number);
+}
+
+function getValidUserRoleAssignments(marks: ScoreMark[], turn: TurnDraft) {
   const whiteSum = getWhiteSum(turn, true);
   const mixedSums = getMixedSums(turn);
 
   if (!whiteSum || marks.length === 0 || marks.length > 2) {
-    return false;
+    return [];
   }
 
   if (marks.length === 1) {
-    return getRolesForMark(marks[0], whiteSum, mixedSums).length > 0;
+    return getRolesForMark(marks[0], whiteSum, mixedSums).map((role) => [role]);
   }
 
   const firstRoles = getRolesForMark(marks[0], whiteSum, mixedSums);
   const secondRoles = getRolesForMark(marks[1], whiteSum, mixedSums);
+  const assignments: MarkRole[][] = [];
 
-  return firstRoles.includes("white") && secondRoles.includes("mixed");
+  if (firstRoles.includes("white") && secondRoles.includes("mixed") && isValidRoleOrder(marks[0], marks[1])) {
+    assignments.push(["white", "mixed"]);
+  }
+
+  if (firstRoles.includes("mixed") && secondRoles.includes("white") && isValidRoleOrder(marks[1], marks[0])) {
+    assignments.push(["mixed", "white"]);
+  }
+
+  return assignments;
+}
+
+function hasValidUserInterpretation(marks: ScoreMark[], turn: TurnDraft) {
+  return getValidUserRoleAssignments(marks, turn).length > 0;
 }
 
 function getCandidateMarks(rows: RowsState, turn: TurnDraft) {
@@ -698,21 +793,18 @@ function getLegalMarkRoles({
     return roleMap;
   }
 
-  const mixedSums = getMixedSums(turn);
-
   getCandidateMarks(rows, turn).forEach((mark) => {
-    const roles = getRolesForMark(mark, whiteSum, mixedSums);
+    const assignments = getValidUserRoleAssignments([...turn.selectedMarks, mark], turn);
     const legalRoles = new Set<MarkRole>();
+    const roleIndex = turn.selectedMarks.length;
 
-    if (turn.selectedMarks.length === 0) {
-      roles.forEach((role) => {
-        if (hasValidUserInterpretation([mark], turn)) {
-          legalRoles.add(role);
-        }
-      });
-    } else if (roles.includes("mixed") && hasValidUserInterpretation([...turn.selectedMarks, mark], turn)) {
-      legalRoles.add("mixed");
-    }
+    assignments.forEach((assignment) => {
+      const role = assignment[roleIndex];
+
+      if (role) {
+        legalRoles.add(role);
+      }
+    });
 
     if (legalRoles.size > 0) {
       roleMap.set(markKey(mark), legalRoles);
@@ -801,6 +893,7 @@ function App() {
   const [gameOverReason, setGameOverReason] = useState<ActiveGame["gameOverReason"]>(
     savedGame?.gameOverReason ?? null,
   );
+  const [undoStack, setUndoStack] = useState<GameSnapshot[]>(savedGame?.undoStack ?? []);
   const [showHints, setShowHints] = useState(readStoredShowHints);
   const [confirmAction, setConfirmAction] = useState<"rollUndo" | "exit" | "startOver" | null>(null);
   const [draggingPlayerId, setDraggingPlayerId] = useState<string | null>(null);
@@ -828,7 +921,7 @@ function App() {
     players.length > 0 &&
     players.every((player) => player.name.trim().length > 0) &&
     Boolean(selectedPlayerId && selectedPlayerExists);
-  const canUndo = turn.history.length > 0 && !gameOver;
+  const canUndo = gameOverReason !== "opponentPenalties" && (turn.history.length > 0 || undoStack.length > 0);
 
   useEffect(() => {
     localStorage.setItem(PLAYERS_KEY, JSON.stringify(players));
@@ -867,6 +960,7 @@ function App() {
       turn,
       gameOver,
       gameOverReason,
+      undoStack,
     };
 
     localStorage.setItem(ACTIVE_GAME_KEY, JSON.stringify(activeGame));
@@ -880,6 +974,7 @@ function App() {
     turn,
     gameOver,
     gameOverReason,
+    undoStack,
   ]);
 
   useEffect(() => {
@@ -979,6 +1074,7 @@ function App() {
     setTurn(game.turn);
     setGameOver(game.gameOver);
     setGameOverReason(game.gameOverReason);
+    setUndoStack(game.undoStack);
     setPage("play");
     setRollAnimationKey(0);
   }
@@ -1015,6 +1111,7 @@ function App() {
     setTurn(createEmptyTurn());
     setGameOver(false);
     setGameOverReason(null);
+    setUndoStack([]);
     setRollAnimationKey(0);
   }
 
@@ -1128,6 +1225,11 @@ function App() {
 
     const latestEntry = turn.history.at(-1);
 
+    if (!latestEntry) {
+      undoCommittedTurn();
+      return;
+    }
+
     if (latestEntry?.kind === "roll") {
       setConfirmAction("rollUndo");
       return;
@@ -1141,6 +1243,24 @@ function App() {
       const latestEntry = currentTurn.history.at(-1);
       return latestEntry ? restoreUndoEntry(currentTurn, latestEntry) : currentTurn;
     });
+    setConfirmAction(null);
+  }
+
+  function undoCommittedTurn() {
+    const snapshot = undoStack.at(-1);
+
+    if (!snapshot) {
+      return;
+    }
+
+    // Restore the exact state from before Next so the turn can be edited.
+    setCurrentPlayerIndex(snapshot.currentPlayerIndex);
+    setRows(cloneRows(snapshot.rows));
+    setPenalties(snapshot.penalties);
+    setTurn(cloneTurn(snapshot.turn));
+    setGameOver(snapshot.gameOver);
+    setGameOverReason(snapshot.gameOverReason);
+    setUndoStack((currentStack) => currentStack.slice(0, -1));
     setConfirmAction(null);
   }
 
@@ -1178,12 +1298,13 @@ function App() {
       return;
     }
 
-    const nextRows: RowsState = {
-      red: { selected: [...rows.red.selected], lock: rows.red.lock },
-      yellow: { selected: [...rows.yellow.selected], lock: rows.yellow.lock },
-      green: { selected: [...rows.green.selected], lock: rows.green.lock },
-      blue: { selected: [...rows.blue.selected], lock: rows.blue.lock },
-    };
+    // Save the editable turn before Next commits it.
+    setUndoStack((currentStack) => [
+      ...currentStack,
+      createGameSnapshot(currentPlayerIndex, rows, penalties, turn, gameOver, gameOverReason),
+    ]);
+
+    const nextRows = cloneRows(rows);
 
     turn.selectedMarks.forEach((mark) => {
       if (!nextRows[mark.row].selected.includes(mark.number)) {
