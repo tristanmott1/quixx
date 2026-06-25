@@ -98,6 +98,18 @@ type SyncReadyPayload = {
   reachedFourPenalties: boolean;
 };
 
+type PendingHostTransfer = {
+  transferId: string;
+  transport: SyncHostTransport;
+  expectedPlayerIds: string[];
+  acceptedPlayerIds: string[];
+};
+
+type PendingJoinTransfer = {
+  transferId: string;
+  transport: SyncJoinTransport;
+};
+
 type GameSnapshot = {
   currentPlayerIndex: number;
   rows: RowsState;
@@ -1038,6 +1050,8 @@ function App() {
   const draftNameInputRef = useRef<HTMLInputElement>(null);
   const hostTransportRef = useRef<SyncHostTransport | null>(null);
   const joinTransportRef = useRef<SyncJoinTransport | null>(null);
+  const pendingHostTransferRef = useRef<PendingHostTransfer | null>(null);
+  const pendingJoinTransferRef = useRef<PendingJoinTransfer | null>(null);
   const rowsRef = useRef(rows);
   const turnRef = useRef(turn);
   const gamePlayersRef = useRef(gamePlayers);
@@ -1194,6 +1208,8 @@ function App() {
   useEffect(() => () => {
     hostTransportRef.current?.close();
     joinTransportRef.current?.close();
+    pendingHostTransferRef.current?.transport.close();
+    pendingJoinTransferRef.current?.transport.close();
   }, []);
 
   useEffect(() => {
@@ -1323,8 +1339,12 @@ function App() {
   function resetSyncRuntime() {
     hostTransportRef.current?.close();
     joinTransportRef.current?.close();
+    pendingHostTransferRef.current?.transport.close();
+    pendingJoinTransferRef.current?.transport.close();
     hostTransportRef.current = null;
     joinTransportRef.current = null;
+    pendingHostTransferRef.current = null;
+    pendingJoinTransferRef.current = null;
     setSyncRole(null);
     setSyncPhase("idle");
     setSyncHostPlayerId(null);
@@ -1468,6 +1488,22 @@ function App() {
       return;
     }
 
+    if (message.type === "hostTransferOffer") {
+      void handleTransferOffer(message);
+      return;
+    }
+
+    if (message.type === "hostTransferAnswer") {
+      const targetNewHostId = typeof message.targetNewHostId === "string" ? message.targetNewHostId : "";
+      hostTransportRef.current?.sendTo(targetNewHostId, message);
+      return;
+    }
+
+    if (message.type === "hostTransferReady") {
+      completeHostTransferFromOldHost(playerId, message);
+      return;
+    }
+
     if (message.type === "rollRequest") {
       handleSyncRollRequest(playerId, message);
       return;
@@ -1494,6 +1530,26 @@ function App() {
 
       setSyncHostPlayerId(hostId);
       setSyncPhase("lobby");
+      return;
+    }
+
+    if (message.type === "hostTransferStart") {
+      void beginTakingHostTransfer(message);
+      return;
+    }
+
+    if (message.type === "hostTransferOffer") {
+      void handleTransferOffer(message);
+      return;
+    }
+
+    if (message.type === "hostTransferAnswer") {
+      void handleTransferAnswer(message);
+      return;
+    }
+
+    if (message.type === "hostTransferComplete") {
+      completeHostTransferLocally(message);
       return;
     }
 
@@ -1585,6 +1641,252 @@ function App() {
     }
 
     removeSyncPlayer(playerId);
+  }
+
+  function canTransferHost() {
+    return syncRoleRef.current === "host" && (syncPhaseRef.current === "hostLobby" || syncPhaseRef.current === "readyToAdvance");
+  }
+
+  function transferHost(nextHostPlayerId: string) {
+    if (!canTransferHost() || nextHostPlayerId === selectedPlayerIdRef.current) {
+      return;
+    }
+
+    const nextHost = gamePlayersRef.current.find((player) => player.id === nextHostPlayerId);
+
+    if (!nextHost) {
+      return;
+    }
+
+    const transferId = createId();
+
+    setSyncMessage(`Transferring to ${nextHost.name}`);
+    hostTransportRef.current?.sendTo(nextHostPlayerId, {
+      type: "hostTransferStart",
+      currentPlayerIndex: currentPlayerIndexRef.current,
+      hostPlayerId: nextHostPlayerId,
+      phase: syncPhaseRef.current,
+      players: gamePlayersRef.current,
+      readyPayloads: syncReadyPayloadsRef.current,
+      transferId,
+      turnId: syncTurnIdRef.current,
+    });
+  }
+
+  async function beginTakingHostTransfer(message: SyncWireMessage) {
+    const transferId = typeof message.transferId === "string" ? message.transferId : "";
+    const nextHostPlayerId = typeof message.hostPlayerId === "string" ? message.hostPlayerId : "";
+    const nextPlayers = normalizePlayers(message.players);
+
+    if (!transferId || nextHostPlayerId !== selectedPlayerIdRef.current || nextPlayers.length === 0) {
+      return;
+    }
+
+    const localPlayer = nextPlayers.find((player) => player.id === nextHostPlayerId);
+
+    if (!localPlayer) {
+      return;
+    }
+
+    const hostTransport = new SyncHostTransport({
+      callbacks: {
+        onMessage: handleHostMessage,
+        onPeerClosed: handleHostPeerClosed,
+      },
+      hostName: localPlayer.name,
+      hostPlayerId: localPlayer.id,
+      roomId: transferId,
+    });
+    const expectedPlayerIds = nextPlayers.filter((player) => player.id !== localPlayer.id).map((player) => player.id);
+
+    pendingHostTransferRef.current?.transport.close();
+    pendingHostTransferRef.current = {
+      transferId,
+      transport: hostTransport,
+      expectedPlayerIds,
+      acceptedPlayerIds: [],
+    };
+    setSyncMessage("Taking host");
+
+    for (const targetPlayerId of expectedPlayerIds) {
+      const offerText = await hostTransport.createOffer();
+      joinTransportRef.current?.send({
+        type: "hostTransferOffer",
+        hostPlayerId: localPlayer.id,
+        offerText,
+        targetPlayerId,
+        transferId,
+      });
+    }
+  }
+
+  async function handleTransferOffer(message: SyncWireMessage) {
+    const transferId = typeof message.transferId === "string" ? message.transferId : "";
+    const targetPlayerId = typeof message.targetPlayerId === "string" ? message.targetPlayerId : "";
+    const nextHostPlayerId = typeof message.hostPlayerId === "string" ? message.hostPlayerId : "";
+    const offerText = typeof message.offerText === "string" ? message.offerText : "";
+    const localPlayerId = selectedPlayerIdRef.current;
+    const localPlayer = gamePlayersRef.current.find((player) => player.id === localPlayerId);
+
+    if (!transferId || !targetPlayerId || !nextHostPlayerId || !offerText) {
+      return;
+    }
+
+    if (targetPlayerId !== localPlayerId) {
+      hostTransportRef.current?.sendTo(targetPlayerId, message);
+      return;
+    }
+
+    if (!localPlayer) {
+      return;
+    }
+
+    const joinTransport = new SyncJoinTransport({
+      onClosed: () => endSyncSession("Host disconnected"),
+      onMessage: handleJoinerMessage,
+      onOpen: () => setSyncMessage("Transfer connected"),
+    });
+
+    try {
+      const answer = await joinTransport.createAnswer(offerText, localPlayer);
+      pendingJoinTransferRef.current?.transport.close();
+      pendingJoinTransferRef.current = { transferId, transport: joinTransport };
+
+      if (syncRoleRef.current === "host") {
+        hostTransportRef.current?.sendTo(nextHostPlayerId, {
+          type: "hostTransferAnswer",
+          answerText: answer.answerText,
+          fromPlayerId: localPlayer.id,
+          targetNewHostId: nextHostPlayerId,
+          transferId,
+        });
+      } else {
+        joinTransportRef.current?.send({
+          type: "hostTransferAnswer",
+          answerText: answer.answerText,
+          fromPlayerId: localPlayer.id,
+          targetNewHostId: nextHostPlayerId,
+          transferId,
+        });
+      }
+    } catch (error) {
+      joinTransport.close();
+      setSyncMessage(error instanceof Error ? error.message : "Transfer failed");
+    }
+  }
+
+  async function handleTransferAnswer(message: SyncWireMessage) {
+    const transfer = pendingHostTransferRef.current;
+    const transferId = typeof message.transferId === "string" ? message.transferId : "";
+    const fromPlayerId = typeof message.fromPlayerId === "string" ? message.fromPlayerId : "";
+    const answerText = typeof message.answerText === "string" ? message.answerText : "";
+
+    if (!transfer || transfer.transferId !== transferId || !fromPlayerId || !answerText) {
+      return;
+    }
+
+    try {
+      await transfer.transport.acceptAnswer(answerText);
+
+      if (!transfer.acceptedPlayerIds.includes(fromPlayerId)) {
+        transfer.acceptedPlayerIds.push(fromPlayerId);
+      }
+
+      if (transfer.expectedPlayerIds.every((playerId) => transfer.acceptedPlayerIds.includes(playerId))) {
+        joinTransportRef.current?.send({
+          type: "hostTransferReady",
+          newHostPlayerId: selectedPlayerIdRef.current,
+          transferId,
+        });
+      }
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : "Transfer failed");
+    }
+  }
+
+  function completeHostTransferFromOldHost(newHostPlayerId: string, message: SyncWireMessage) {
+    const transferId = typeof message.transferId === "string" ? message.transferId : "";
+
+    if (!canTransferHost() || !transferId || newHostPlayerId !== message.newHostPlayerId) {
+      return;
+    }
+
+    const completeMessage: SyncWireMessage = {
+      type: "hostTransferComplete",
+      currentPlayerIndex: currentPlayerIndexRef.current,
+      hostPlayerId: newHostPlayerId,
+      phase: syncPhaseRef.current,
+      players: gamePlayersRef.current,
+      readyPayloads: syncReadyPayloadsRef.current,
+      transferId,
+      turnId: syncTurnIdRef.current,
+    };
+
+    hostTransportRef.current?.broadcast(completeMessage);
+    window.setTimeout(() => completeHostTransferLocally(completeMessage), 150);
+  }
+
+  function completeHostTransferLocally(message: SyncWireMessage) {
+    const transferId = typeof message.transferId === "string" ? message.transferId : "";
+    const nextHostPlayerId = typeof message.hostPlayerId === "string" ? message.hostPlayerId : "";
+    const nextPlayers = normalizePlayers(message.players);
+    const nextReadyPayloads = Array.isArray(message.readyPayloads)
+      ? message.readyPayloads.map(normalizeReadyPayload).filter((payload): payload is SyncReadyPayload => Boolean(payload))
+      : [];
+    const nextPhase =
+      message.phase === "hostLobby" || message.phase === "readyToAdvance" || message.phase === "turn"
+        ? message.phase
+        : syncPhaseRef.current;
+    const nextTurn = typeof message.turnId === "string" ? message.turnId : syncTurnIdRef.current;
+    const nextIndex = Number(message.currentPlayerIndex);
+    const localPlayerId = selectedPlayerIdRef.current;
+
+    if (!transferId || !nextHostPlayerId || nextPlayers.length === 0) {
+      return;
+    }
+
+    const localIsNewHost = localPlayerId === nextHostPlayerId;
+    const displayedPhase = !localIsNewHost && nextPhase === "hostLobby" ? "lobby" : nextPhase;
+
+    setSyncHostPlayerId(nextHostPlayerId);
+    setGamePlayers(nextPlayers);
+    setCurrentPlayerIndex(Number.isInteger(nextIndex) ? nextIndex : currentPlayerIndexRef.current);
+    setSyncTurnId(nextTurn);
+    setSyncReadyPayloads(nextReadyPayloads);
+    setSyncPhase(displayedPhase);
+
+    if (localIsNewHost) {
+      const transfer = pendingHostTransferRef.current;
+
+      if (transfer?.transferId === transferId) {
+        hostTransportRef.current = transfer.transport;
+        pendingHostTransferRef.current = null;
+      }
+
+      joinTransportRef.current?.close();
+      joinTransportRef.current = null;
+      setSyncRole("host");
+      setSyncMessage("You are host");
+      return;
+    }
+
+    const joinTransfer = pendingJoinTransferRef.current;
+
+    if (joinTransfer?.transferId === transferId) {
+      joinTransportRef.current?.close();
+      joinTransportRef.current = joinTransfer.transport;
+      pendingJoinTransferRef.current = null;
+    }
+
+    if (syncRoleRef.current === "host") {
+      window.setTimeout(() => {
+        hostTransportRef.current?.close();
+        hostTransportRef.current = null;
+      }, 300);
+    }
+
+    setSyncRole("joiner");
+    setSyncMessage(`${nextPlayers.find((player) => player.id === nextHostPlayerId)?.name ?? "New host"} is host`);
   }
 
   function startSyncedPlay(nextPlayers: Player[], turnId: string) {
@@ -1730,11 +2032,12 @@ function App() {
     const nextReason = normalizeGameOverReason(message.gameOverReason);
     const committed = commitLocalTurnState(rowsRef.current, penalties, turnRef.current);
     const withGlobalClosures = applyGlobalClosedRows(committed.rows, closedRows);
+    const localReason = committed.penalties >= MAX_PENALTIES ? "ownPenalties" : nextReason;
 
     setRows(withGlobalClosures);
     setPenalties(committed.penalties);
     setGameOver(nextGameOver);
-    setGameOverReason(nextReason);
+    setGameOverReason(localReason);
     setGamePlayers(nextPlayers.length > 0 ? nextPlayers : gamePlayersRef.current);
     setCurrentPlayerIndex(Number.isInteger(nextIndex) ? nextIndex : 0);
     setTurn(createEmptyTurn());
@@ -2354,6 +2657,7 @@ function App() {
                   onRemove={removeSyncPlayer}
                   onScanAnswer={() => setSyncCameraMode("answer")}
                   onStart={startSyncGame}
+                  onTransfer={transferHost}
                 />
               ) : null}
 
@@ -2485,6 +2789,7 @@ function App() {
               readyPlayerIds={readyPlayerIds}
               syncMessage={syncMessage}
               onRemove={isHost ? removeSyncPlayer : undefined}
+              onTransfer={isHost && syncPhase === "readyToAdvance" ? transferHost : undefined}
             />
           ) : null}
 
@@ -2577,6 +2882,7 @@ function SyncLobby({
   onRemove,
   onScanAnswer,
   onStart,
+  onTransfer,
   players,
   readyPlayerIds,
   syncMessage,
@@ -2590,6 +2896,7 @@ function SyncLobby({
   onRemove?: (playerId: string) => void;
   onScanAnswer?: () => void;
   onStart?: () => void;
+  onTransfer?: (playerId: string) => void;
   players: Player[];
   readyPlayerIds: string[];
   syncMessage: string;
@@ -2625,6 +2932,16 @@ function SyncLobby({
                   <ChevronDown size={14} />
                 </button>
               </span>
+            ) : null}
+            {isHost && onTransfer && player.id !== localPlayerId ? (
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => onTransfer(player.id)}
+                aria-label={`Transfer host to ${player.name}`}
+              >
+                <Crown size={15} />
+              </button>
             ) : null}
             {isHost && onRemove && player.id !== localPlayerId ? (
               <button className="icon-button danger" type="button" onClick={() => onRemove(player.id)} aria-label={`Remove ${player.name}`}>

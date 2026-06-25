@@ -156,6 +156,7 @@ Host-to-player events include:
 
 - Lobby state.
 - Host transfer.
+- Relayed host-transfer offer and answer messages.
 - Game start.
 - Turn start.
 - Dice roll result.
@@ -168,6 +169,7 @@ Host-to-player events include:
 Player-to-host events include:
 
 - Join metadata after the QR handshake completes.
+- Host-transfer readiness.
 - Current-player roll request.
 - Ready payload.
 - Voluntary exit.
@@ -194,6 +196,18 @@ The host can transfer host authority only:
 - During `readyToAdvance`.
 
 The host cannot transfer while a turn is in progress.
+
+Host transfer should not require new QR scans after the game is already synced.
+
+Transfer flow:
+
+- The current host chooses another connected player as the new host.
+- The current host temporarily relays WebRTC offer and answer messages between the chosen new host and every other active player.
+- The chosen new host creates fresh direct WebRTC data channels to every other active player.
+- Once every fresh channel is open, the current host sends a host-transfer-complete event to everyone.
+- The chosen player becomes the host.
+- Every other player, including the old host if they remain in the game, switches to the new host channel.
+- The old host's previous star network is closed after the handoff.
 
 The host must transfer host authority before exiting. If the host phone dies, loses connection, closes the app unexpectedly, or otherwise disconnects without transferring host authority, the sync session ends for every player.
 
@@ -991,6 +1005,8 @@ Before considering an implementation complete:
 - Verify sync non-host Exit removes that player and future turns skip them.
 - Verify sync current-player exit or host removal discards the current turn and skips to the next active player.
 - Verify sync host transfer is allowed only in lobby and `readyToAdvance`.
+- Verify sync host transfer creates fresh direct channels to the new host without new QR scans.
+- Verify the old host can exit after a completed host transfer.
 - Verify unexpected host disconnect ends the synced session for everyone.
 - Verify local row closing, staged locks, die removal after Next, and multiple row closures.
 - Verify sync row closing, shared row closure reveal after Advance, die removal after Advance, and multiple row closures.

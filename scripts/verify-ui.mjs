@@ -302,11 +302,13 @@ async function runSyncHostChecks(page) {
 async function runSyncTransportChecks(browser) {
   const hostPage = await browser.newPage();
   const joinPage = await browser.newPage();
+  const otherPage = await browser.newPage();
 
   await hostPage.goto(baseUrl);
   await joinPage.goto(baseUrl);
+  await otherPage.goto(baseUrl);
 
-  const offer = await hostPage.evaluate(async () => {
+  await hostPage.evaluate(async () => {
     const { SyncHostTransport } = await import("/src/syncTransport.ts");
     window.__messages = [];
     window.__host = new SyncHostTransport({
@@ -317,26 +319,94 @@ async function runSyncTransportChecks(browser) {
       hostPlayerId: "alice",
       roomId: "room",
     });
-    return window.__host.createOffer();
   });
 
-  const answer = await joinPage.evaluate(async (offerText) => {
-    const { SyncJoinTransport } = await import("/src/syncTransport.ts");
-    window.__join = new SyncJoinTransport({
-      onMessage: () => {},
-    });
-    const result = await window.__join.createAnswer(offerText, { id: "bob", name: "Bob" });
-    return result.answerText;
-  }, offer);
+  async function connectJoiner(page, player) {
+    const offer = await hostPage.evaluate(() => window.__host.createOffer());
+    const answer = await page.evaluate(async ({ offerText, nextPlayer }) => {
+      const { SyncJoinTransport } = await import("/src/syncTransport.ts");
+      window.__joinMessages = [];
+      window.__join = new SyncJoinTransport({
+        onMessage: (_playerId, message) => window.__joinMessages.push(message),
+      });
+      const result = await window.__join.createAnswer(offerText, nextPlayer);
+      return result.answerText;
+    }, { offerText: offer, nextPlayer: player });
 
-  await hostPage.evaluate((answerText) => window.__host.acceptAnswer(answerText), answer);
-  await hostPage.waitForFunction(() => window.__messages?.some((message) => message.type === "join"), null, { timeout: 5000 });
+    await hostPage.evaluate((answerText) => window.__host.acceptAnswer(answerText), answer);
+    await hostPage.waitForFunction(
+      (playerId) => window.__messages?.some((message) => message.type === "join" && message.playerId === playerId),
+      player.id,
+      { timeout: 5000 },
+    );
+  }
+
+  await connectJoiner(joinPage, { id: "bob", name: "Bob" });
+  await connectJoiner(otherPage, { id: "cora", name: "Cora" });
 
   await joinPage.evaluate(() => window.__join.send({ type: "ready", payload: { turnId: "t1", playerId: "bob" } }));
   await hostPage.waitForFunction(() => window.__messages?.some((message) => message.type === "ready"), null, { timeout: 5000 });
 
+  const transferOffers = await joinPage.evaluate(async () => {
+    const { SyncHostTransport } = await import("/src/syncTransport.ts");
+    window.__newHostMessages = [];
+    window.__newHost = new SyncHostTransport({
+      callbacks: {
+        onMessage: (_playerId, message) => window.__newHostMessages.push(message),
+      },
+      hostName: "Bob",
+      hostPlayerId: "bob",
+      roomId: "transfer",
+    });
+
+    return {
+      alice: await window.__newHost.createOffer(),
+      cora: await window.__newHost.createOffer(),
+    };
+  });
+
+  const aliceTransferAnswer = await hostPage.evaluate(async (offerText) => {
+    const { SyncJoinTransport } = await import("/src/syncTransport.ts");
+    window.__aliceJoinMessages = [];
+    window.__aliceJoin = new SyncJoinTransport({
+      onMessage: (_playerId, message) => window.__aliceJoinMessages.push(message),
+    });
+    const result = await window.__aliceJoin.createAnswer(offerText, { id: "alice", name: "Alice" });
+    return result.answerText;
+  }, transferOffers.alice);
+
+  const coraTransferAnswer = await otherPage.evaluate(async (offerText) => {
+    const { SyncJoinTransport } = await import("/src/syncTransport.ts");
+    window.__coraJoinMessages = [];
+    window.__coraJoin = new SyncJoinTransport({
+      onMessage: (_playerId, message) => window.__coraJoinMessages.push(message),
+    });
+    const result = await window.__coraJoin.createAnswer(offerText, { id: "cora", name: "Cora" });
+    return result.answerText;
+  }, transferOffers.cora);
+
+  await joinPage.evaluate(
+    async ({ aliceAnswer, coraAnswer }) => {
+      await window.__newHost.acceptAnswer(aliceAnswer);
+      await window.__newHost.acceptAnswer(coraAnswer);
+      window.__newHost.broadcast({ type: "hostTransferComplete", hostPlayerId: "bob" });
+    },
+    { aliceAnswer: aliceTransferAnswer, coraAnswer: coraTransferAnswer },
+  );
+  await hostPage.waitForFunction(
+    () => window.__aliceJoinMessages?.some((message) => message.type === "hostTransferComplete"),
+    null,
+    { timeout: 5000 },
+  );
+  await otherPage.waitForFunction(
+    () => window.__coraJoinMessages?.some((message) => message.type === "hostTransferComplete"),
+    null,
+    { timeout: 5000 },
+  );
+
   await hostPage.close();
   await joinPage.close();
+  await otherPage.close();
 }
 
 async function main() {

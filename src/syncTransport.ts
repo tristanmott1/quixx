@@ -73,6 +73,40 @@ function waitForIceGathering(peerConnection: RTCPeerConnection) {
   });
 }
 
+function waitForChannelOpen(channel: RTCDataChannel) {
+  if (channel.readyState === "open") {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Connection did not open."));
+    }, 6000);
+
+    function cleanup() {
+      window.clearTimeout(timeout);
+      channel.removeEventListener("open", handleOpen);
+      channel.removeEventListener("close", handleClose);
+      channel.removeEventListener("error", handleClose);
+    }
+
+    function handleOpen() {
+      cleanup();
+      resolve();
+    }
+
+    function handleClose() {
+      cleanup();
+      reject(new Error("Connection closed before opening."));
+    }
+
+    channel.addEventListener("open", handleOpen);
+    channel.addEventListener("close", handleClose);
+    channel.addEventListener("error", handleClose);
+  });
+}
+
 function parsePayload(value: string) {
   try {
     if (value.startsWith("qwixx:")) {
@@ -243,6 +277,7 @@ export class SyncHostTransport {
     });
 
     await pending.peerConnection.setRemoteDescription(answer.sdp);
+    await waitForChannelOpen(pending.channel);
 
     return {
       id: answer.playerId,
