@@ -109,6 +109,7 @@ async function runSourceChecks() {
   assert(scoreCards.length === 100, "Exactly 100 score-card presets are available.");
   assert(appSource.includes("page === \"picker\""), "Score-card picker is a real app page.");
   assert(appSource.includes("openScoreCardPicker"), "Home score-card previews can open the picker.");
+  assert(appSource.includes("score-row-backdrop"), "Score-card rows render a grid-aligned segmented backdrop.");
   assert(appSource.includes("scoreCardId:"), "Local and sync game setup carries a selected score-card id.");
   assert(appSource.includes("syncScoreCardId"), "Sync mode tracks the host-selected runtime score card.");
   assert(appSource.includes("broadcastLobbyState") && appSource.includes("scoreCardId"), "Sync lobby broadcasts score-card changes.");
@@ -233,6 +234,17 @@ async function runFlowChecks(page) {
   });
   assert((await page.getByRole("heading", { name: "Card #34" }).count()) === 1, "Picker can select a mixed-number score card.");
   await page.screenshot({ path: outputPath("score-card-picker-mobile.png"), fullPage: true });
+  await page.getByRole("checkbox", { name: "Colors", exact: true }).check();
+  await page.getByRole("button", { name: "Select card 35", exact: true }).scrollIntoViewIfNeeded();
+  await page.getByRole("button", { name: "Select card 35", exact: true }).click();
+  await page.waitForFunction(() => {
+    const heading = document.querySelector(".card-picker-page h1");
+    const top = heading?.getBoundingClientRect().top ?? 999;
+
+    return top >= 0 && top < 120;
+  });
+  assert((await page.getByRole("heading", { name: "Card #35" }).count()) === 1, "Picker can show a mixed-color score card.");
+  await page.screenshot({ path: outputPath("score-card-picker-mixed-colors-mobile.png"), fullPage: true });
   await page.getByRole("button", { name: "Back" }).click();
   assert((await page.locator(".score-card-choice-heading", { hasText: "Card #1" }).count()) === 1, "Back keeps the original score-card selection.");
 
@@ -584,6 +596,8 @@ async function main() {
     const desktop = await browser.newPage({ deviceScaleFactor: 1, viewport: { width: 900, height: 900 } });
     await setGame(desktop, activeGameForRoll({ whiteA: 3, whiteB: 4, red: 4, yellow: 2, green: 6, blue: 1 }));
     await desktop.screenshot({ path: outputPath("play-desktop.png"), fullPage: true });
+    await setGame(desktop, activeGameForRoll({ whiteA: 3, whiteB: 4, red: 4, yellow: 2, green: 6, blue: 1 }, { scoreCardId: 35 }));
+    await desktop.screenshot({ path: outputPath("play-mixed-colors-desktop.png"), fullPage: true });
 
     await browser.close();
   } finally {

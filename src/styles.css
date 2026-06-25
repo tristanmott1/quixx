@@ -728,14 +728,67 @@ button:focus-visible {
 }
 
 .score-row {
+  position: relative;
   display: grid;
-  grid-template-columns: repeat(11, minmax(0, 1fr)) 34px;
-  gap: 4px;
+  grid-template-columns: repeat(11, minmax(0, 1fr)) var(--score-lock-size);
+  gap: var(--score-row-gap);
   align-items: center;
-  padding: 5px;
+  padding: var(--score-row-padding);
   border-radius: 8px;
+  overflow: hidden;
+  --score-lock-size: 34px;
+  --score-row-gap: 4px;
+  --score-row-padding: 5px;
   --row-tile-fill: rgba(255, 255, 255, 0.92);
   --row-tile-border: var(--row-tile-fill);
+}
+
+.score-row-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: grid;
+  grid-template-columns: inherit;
+  gap: var(--score-row-gap);
+  padding: var(--score-row-padding);
+  border-radius: inherit;
+  box-sizing: border-box;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.score-row-segment {
+  position: relative;
+  min-width: 0;
+}
+
+.score-row-segment::before {
+  content: "";
+  position: absolute;
+  top: calc(-1 * var(--score-row-padding));
+  right: calc(-0.5 * var(--score-row-gap));
+  bottom: calc(-1 * var(--score-row-padding));
+  left: calc(-0.5 * var(--score-row-gap));
+  background: var(--score-row-segment-bg);
+}
+
+.score-row-segment:first-child::before {
+  left: calc(-1 * var(--score-row-padding));
+}
+
+.score-row-segment:last-child::before {
+  right: calc(-1 * var(--score-row-padding));
+}
+
+.score-row-segment.divider-after::after {
+  content: "";
+  position: absolute;
+  top: calc(-1 * var(--score-row-padding));
+  right: calc(-0.5 * var(--score-row-gap) - 0.5px);
+  bottom: calc(-1 * var(--score-row-padding));
+  z-index: 1;
+  width: 1px;
+  background: rgba(24, 24, 27, 0.18);
 }
 
 .score-row.red {
@@ -771,9 +824,9 @@ button:focus-visible {
 }
 
 .score-card-preview .score-row {
-  grid-template-columns: repeat(11, minmax(0, 1fr)) 30px;
-  gap: 3px;
-  padding: 4px;
+  --score-lock-size: 30px;
+  --score-row-gap: 3px;
+  --score-row-padding: 4px;
 }
 
 .score-card-preview .score-tile,
@@ -790,6 +843,7 @@ button:focus-visible {
 .score-tile,
 .lock-tile {
   position: relative;
+  z-index: 1;
   display: grid;
   place-items: center;
   min-width: 0;
@@ -1203,9 +1257,9 @@ button:focus-visible {
   }
 
   .score-row {
-    grid-template-columns: repeat(11, minmax(0, 1fr)) 28px;
-    gap: 3px;
-    padding: 4px;
+    --score-lock-size: 28px;
+    --score-row-gap: 3px;
+    --score-row-padding: 4px;
   }
 
   .score-tile,
@@ -1258,8 +1312,8 @@ button:focus-visible {
 
 @media (max-width: 380px) {
   .score-row {
-    grid-template-columns: repeat(11, minmax(0, 1fr)) 26px;
-    gap: 2px;
+    --score-lock-size: 26px;
+    --score-row-gap: 2px;
   }
 
   .score-tile,

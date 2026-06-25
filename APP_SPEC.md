@@ -300,6 +300,7 @@ The visual effect should look like standard rows were cut into colored segments 
 - Row bands still use the same shape, thickness, and color treatment as standard rows.
 - Number tiles still use the same shape and tile treatment as standard tiles.
 - Segment boundaries may use simple vertical divider lines between color segments.
+- Segment divider lines should be centered in the visual gap between adjacent tiles, including compact previews and full Play page rows.
 - The row should not become neutral or white just because it contains multiple colors.
 
 ### Mixed Number And Mixed Color Presets
@@ -1807,6 +1808,7 @@ Before considering an implementation complete:
 - Verify mixed-color card selection uses tile color for mixed sums.
 - Verify mixed-color card scoring counts tile colors rather than row identity.
 - Verify closing a mixed-color row removes the final tile/lock color die but leaves same-color tiles on other open rows selectable by white sums.
+- Capture visual verification screenshots for mixed-color compact picker previews and full Play page rows so segment divider alignment can be inspected.
 - Verify scoring, penalties, and game-over conditions in both modes.
 - Verify local reload persistence.
 - Verify sync reload or disconnect behavior matches the no-late-reconnect v1 rule.

@@ -3745,16 +3745,10 @@ function scoreTileStyle(color: RowColor): CSSProperties {
   } as CSSProperties;
 }
 
-function scoreRowBackground(scoreCard: ScoreCardPreset, row: RowColor) {
-  const colors = [...getScoreCardRow(scoreCard, row).tiles.map((tile) => tile.color), getScoreCardLockColor(scoreCard, row)];
-  const stops = colors.map((color, index) => {
-    const start = `${(index / colors.length) * 100}%`;
-    const end = `${((index + 1) / colors.length) * 100}%`;
-
-    return `${SCORE_COLOR_BACKGROUNDS[color]} ${start} ${end}`;
-  });
-
-  return `linear-gradient(to right, ${stops.join(", ")})`;
+function scoreSegmentStyle(color: RowColor): CSSProperties {
+  return {
+    "--score-row-segment-bg": SCORE_COLOR_BACKGROUNDS[color],
+  } as CSSProperties;
 }
 
 function ScoreRow({
@@ -3787,12 +3781,23 @@ function ScoreRow({
   const cardRow = getScoreCardRow(scoreCard, row);
   const rowLabel = getScoreCardRowLabel(row);
   const lockColor = getScoreCardLockColor(scoreCard, row);
+  const rowSegments = [...cardRow.tiles.map((tile) => tile.color), lockColor];
   const ownLock = rows[row].lock === "own" || hasStagedOwnLock(scoreCard, row, turn);
   const opponentLock = rows[row].lock === "opponent" || turn.opponentLocks.includes(row);
   const closed = rows[row].lock !== "none";
 
   return (
-    <div className={`score-row ${row} ${closed ? "closed" : ""}`} style={{ background: scoreRowBackground(scoreCard, row) }}>
+    <div className={`score-row ${row} ${closed ? "closed" : ""}`}>
+      <div className="score-row-backdrop" aria-hidden="true">
+        {rowSegments.map((color, index) => (
+          <span
+            className={rowSegments[index + 1] && rowSegments[index + 1] !== color ? "score-row-segment divider-after" : "score-row-segment"}
+            key={`${color}-${index}`}
+            style={scoreSegmentStyle(color)}
+          />
+        ))}
+      </div>
+
       {cardRow.tiles.map((tile) => {
         const number = tile.number;
         const mark: ScoreMark = { row, number };
