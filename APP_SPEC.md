@@ -172,7 +172,7 @@ Host-to-player events include:
 - Turn start.
 - Dice roll result.
 - Ready status summary.
-- Advance result.
+- Automatic advance result.
 - Player removal.
 - Host start over.
 - Session ended.
@@ -197,8 +197,7 @@ Any sync callback that needs current play state should read from the latest-stat
 Sync mode has explicit shared phases:
 
 - `lobby`: players are joining, host can reorder/randomize, host can start.
-- `turn`: one player is current, dice are rolled, players make private selections, players press Ready.
-- `readyToAdvance`: every active player is Ready, no one can edit, host can confirm Advance.
+- `turn`: one player is current, dice are rolled, players make private selections, and all active players press Ready before the turn advances automatically.
 - `gameOver`: final shared game state is visible.
 - `ended`: sync session has ended because the host disconnected, the host ended the session, or the local player exited.
 
@@ -230,12 +229,12 @@ Exit and host removal use the same game behavior:
 - The removed player is gone for the rest of the synced game.
 - There is no late reconnect in v1.
 
-If a non-current player exits or is removed during `turn` or during `readyToAdvance` before host Advance:
+If a non-current player exits or is removed during `turn`:
 
 - Any unfinalized Ready payload from that player is discarded.
-- If all remaining active players are already Ready, the game enters `readyToAdvance`.
+- If all remaining active players are already Ready, the turn advances automatically.
 
-If the current player exits or is removed during a turn, including during `readyToAdvance` before host Advance:
+If the current player exits or is removed during a turn:
 
 - The entire current turn is discarded for everyone.
 - All current-turn local selections and Ready states are cleared.
@@ -328,7 +327,7 @@ Dice styling:
 If a colored row has been closed, its corresponding colored die disappears completely after the closing turn is committed:
 
 - In local mode, this happens when Next is pressed.
-- In sync mode, this happens when the host confirms Advance.
+- In sync mode, this happens when all active players are Ready and the turn advances automatically.
 
 White dice are never removed.
 
@@ -387,8 +386,6 @@ In sync mode:
 
 - During `turn`, the primary turn action is Ready.
 - After Ready is pressed, the player's score-card controls and Undo are disabled until the next turn.
-- During `readyToAdvance`, the host sees Advance as the primary action.
-- During `readyToAdvance`, non-host players see that the game is waiting for the host to advance.
 - The host can see which players are Ready.
 
 ## Score Card Layout
@@ -461,8 +458,8 @@ In sync mode:
 - There is no opponent row-closure control.
 - Each player can only close rows on that player's own score card.
 - A player who closes a row includes that closed row in their Ready payload.
-- Row closures are not revealed or applied globally until the host confirms Advance.
-- If any active player's Ready payload closes a row, that row becomes globally closed for everyone when Advance is confirmed.
+- Row closures are not revealed or applied globally until all active players are Ready.
+- If any active player's Ready payload closes a row, that row becomes globally closed for everyone when the turn advances automatically.
 - A lock icon counts as a point only for the player who personally selected that row's final number.
 - If another player closes a row, the local row still becomes disabled and visibly locked, but the lock icon does not count for the local score.
 - If multiple players close the same row on the same synced turn, each of those players gets their own lock point, and everyone else gets only the global row closure.
@@ -475,7 +472,7 @@ After a turn commits any own, opponent, or synced row closure:
 If multiple rows close on one turn, all of them are committed together:
 
 - In local mode, when Next is pressed.
-- In sync mode, when the host confirms Advance.
+- In sync mode, when all active players are Ready and the turn advances automatically.
 
 ## Selection Rules
 
@@ -592,7 +589,7 @@ Penalty behavior:
 - Selecting a penalty satisfies the user's turn requirement.
 - A penalty cannot be combined with score-card number selections.
 - If the user reaches 4 penalties, the game is over in local mode when Next commits the penalty.
-- If the user reaches 4 penalties in sync mode, the player's Ready payload reports it, and the shared game ends when the host confirms Advance.
+- If the user reaches 4 penalties in sync mode, the player's Ready payload reports it, and the shared game ends when all active players are Ready.
 
 In local mode, the Play page should also include a small control to indicate that an opponent has reached 4 penalties. Pressing it ends the game.
 
@@ -639,7 +636,7 @@ When Next is pressed:
 
 If the current player is the last player, wrap to the first player. There are no rounds to configure.
 
-## Sync Ready And Advance
+## Sync Ready And Automatic Advance
 
 In sync mode, players do not press Next to advance the turn. They press Ready after completing their own private turn actions.
 
@@ -661,8 +658,8 @@ For the current player:
 When a player presses Ready:
 
 - The player's local marks and penalties for that turn become a locked pending result.
-- The pending result becomes final only when the host confirms Advance.
-- If the current turn is discarded before Advance, the pending result is cleared.
+- The pending result becomes final only when all active players are Ready.
+- If the current turn is discarded before all active players are Ready, the pending result is cleared.
 - The player's controls lock until the next turn.
 - Undo is disabled until the next turn.
 - The player sends a Ready payload to the host.
@@ -678,17 +675,12 @@ The Ready payload does not include the player's full private score card.
 
 When all active players are Ready:
 
-- The game enters `readyToAdvance`.
 - No player can edit the completed turn.
 - The host can see who is Ready.
-- The host can confirm Advance.
-- The host can remove players if needed.
-
-When the host confirms Advance:
-
 - All Ready payloads for the current `turnId` are applied together.
 - Each device finalizes its own locked pending result for the current turn.
 - Newly closed rows are revealed and globally closed for everyone.
+- The host broadcasts the finalized turn result and the next turn starts automatically.
 - Dice for newly closed rows are removed.
 - Game-over conditions are checked.
 - If the game is not over, the game advances to the next active player in order.
@@ -745,7 +737,6 @@ In sync mode, Undo is intentionally narrower:
 - Undo cannot undo a synced dice roll.
 - Undo cannot undo Ready.
 - Once Ready is pressed, Undo is disabled until the next turn begins.
-- During `readyToAdvance`, Undo is disabled for every player.
 
 Sync uncommitted undoable actions include:
 
@@ -769,8 +760,8 @@ In local mode, the game ends when any of these conditions becomes true:
 
 In sync mode, the game ends when any of these conditions becomes true:
 
-- Host Advance applies Ready payloads that bring the shared closed-row count to two.
-- Host Advance applies a Ready payload from any player who reached 4 penalties.
+- Automatic advance applies Ready payloads that bring the shared closed-row count to two.
+- Automatic advance applies a Ready payload from any player who reached 4 penalties.
 - The host disconnects unexpectedly and the synced session ends.
 - The host intentionally ends the synced session.
 - Player exits or removals leave fewer than one active player.
@@ -779,7 +770,7 @@ When the game is over:
 
 - Nothing about the page layout changes.
 - Scores remain visible and final.
-- The local Next, Ready, or Advance button is disabled as appropriate.
+- The local Next or Ready button is disabled as appropriate.
 - Exit remains available.
 - Local Start over remains available.
 - Sync Start over remains available only to the host.
@@ -795,8 +786,8 @@ Opponent lock icons do not count for the user.
 In sync mode:
 
 - The local display may include the player's pending current-turn selections after Ready.
-- Pending current-turn selections become final only when the host confirms Advance.
-- If the current turn is discarded before Advance, pending selections are removed and scores return to the previous final state.
+- Pending current-turn selections become final only when all active players are Ready.
+- If the current turn is discarded before all active players are Ready, pending selections are removed and scores return to the previous final state.
 
 Scoring guide:
 
@@ -999,9 +990,9 @@ Before considering an implementation complete:
 - Verify sync undo applies only to the local player's unready current-turn actions.
 - Verify sync roll, Ready, and previous turns cannot be undone.
 - Verify sync Ready locks the local controls and sends only the Ready payload.
-- Verify all active players Ready moves the game to `readyToAdvance`, not directly to the next turn.
-- Verify only the host can confirm Advance.
-- Verify sync Advance applies all Ready payloads, row closures, penalty game-over state, and next-player selection together.
+- Verify all active players Ready automatically advances to the next turn.
+- Verify no sync Advance button or between-turn phase appears.
+- Verify automatic sync advance applies all Ready payloads, row closures, penalty game-over state, and next-player selection together.
 - Verify local Exit and Start over confirmation pop-ups.
 - Verify sync host-only Start over confirmation and fresh-game restart without QR resync.
 - Verify sync non-host Exit removes that player and future turns skip them.
@@ -1009,7 +1000,7 @@ Before considering an implementation complete:
 - Verify sync host Exit is allowed even when other players remain and sends `sessionEnded`.
 - Verify unexpected host disconnect ends the synced session for everyone.
 - Verify local row closing, staged locks, die removal after Next, and multiple row closures.
-- Verify sync row closing, shared row closure reveal after Advance, die removal after Advance, and multiple row closures.
+- Verify sync row closing, shared row closure reveal on automatic advance, die removal after automatic advance, and multiple row closures.
 - Verify scoring, penalties, and game-over conditions in both modes.
 - Verify local reload persistence.
 - Verify sync reload or disconnect behavior matches the no-late-reconnect v1 rule.

@@ -101,8 +101,10 @@ async function runSourceChecks() {
   assert(/type LatestSyncState = \{[\s\S]*penalties: number;/.test(appSource), "LatestSyncState includes penalties.");
   assert(
     appSource.includes("commitLocalTurnState(latest.rows, latest.penalties, latest.turn)"),
-    "Sync Advance commits from latest rows, penalties, and turn.",
+    "Automatic sync advance commits from latest rows, penalties, and turn.",
   );
+  assert(!appSource.includes("readyToAdvance"), "Sync has no between-turn readyToAdvance phase.");
+  assert(!appSource.includes("advanceEnabled"), "Sync has no user-facing Advance button state.");
 }
 
 function rowsState() {
@@ -325,11 +327,10 @@ async function runSyncHostChecks(page) {
   await page.locator("button.score-tile.legal").first().click();
   assert(!(await page.getByRole("button", { name: "Ready" }).isDisabled()), "Sync Ready enables after a valid mark.");
   await page.getByRole("button", { name: "Ready" }).click();
-  assert(await page.getByRole("button", { name: "Undo" }).isDisabled(), "Sync Ready disables Undo.");
-  assert(!(await page.getByRole("button", { name: "Advance" }).isDisabled()), "Single-player sync host can advance after Ready.");
+  assert((await page.getByRole("button", { name: "Advance" }).count()) === 0, "Sync play has no Advance button.");
+  assert(await page.getByRole("button", { name: "Ready" }).isDisabled(), "Single-player sync host auto-advances after Ready.");
+  assert(await page.getByRole("button", { name: "Undo" }).isDisabled(), "Sync Ready keeps Undo disabled after automatic advance.");
   assert((await page.getByRole("button", { name: /Transfer host/ }).count()) === 0, "Permanent-host replacement controls are not shown.");
-  await page.getByRole("button", { name: "Advance" }).click();
-  assert((await page.getByRole("button", { name: "Ready" }).count()) === 1, "Sync returns to the next turn after Advance.");
   await page.screenshot({ path: outputPath("sync-play-after-advance-mobile.png"), fullPage: true });
   await page.getByRole("button", { name: "Exit" }).click();
   assert((await page.getByRole("dialog", { name: "Exit?" }).count()) === 1, "Sync host Exit asks for confirmation.");

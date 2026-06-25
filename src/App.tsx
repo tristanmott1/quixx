@@ -39,7 +39,7 @@ type Page = "home" | "play";
 type HomeTab = "local" | "sync";
 type PlayMode = "local" | "sync";
 type SyncRole = "host" | "joiner" | null;
-type SyncPhase = "idle" | "hostLobby" | "scanOffer" | "showAnswer" | "lobby" | "turn" | "readyToAdvance" | "gameOver" | "ended";
+type SyncPhase = "idle" | "hostLobby" | "scanOffer" | "showAnswer" | "lobby" | "turn" | "gameOver" | "ended";
 
 type Player = {
   id: string;
@@ -1115,7 +1115,6 @@ function App() {
       !isLocalReady &&
       (isUserTurn ? canAdvanceTurn(turn, true, false) : Boolean(turn.roll))
     : false;
-  const advanceEnabled = isSyncMode && isHost && syncPhase === "readyToAdvance" && !gameOver;
   const penaltyEnabled = canSelectPenalty(turn, isUserTurn, penalties, gameOver || isLocalReady);
   const totalScore = getTotalScore(rows, penalties, turn);
   const penaltyCount = getPenaltyCount(penalties, turn);
@@ -1607,11 +1606,10 @@ function App() {
       const payloads = Array.isArray(message.payloads)
         ? message.payloads.map(normalizeReadyPayload).filter((payload): payload is SyncReadyPayload => Boolean(payload))
         : [];
-      const nextPhase = message.phase === "readyToAdvance" ? "readyToAdvance" : "turn";
 
-      syncLatestState({ syncReadyPayloads: payloads, syncPhase: nextPhase });
+      syncLatestState({ syncReadyPayloads: payloads, syncPhase: "turn" });
       setSyncReadyPayloads(payloads);
-      setSyncPhase(nextPhase);
+      setSyncPhase("turn");
       return;
     }
 
@@ -1753,21 +1751,26 @@ function App() {
     const latest = latestRef.current;
     const currentPlayers = latest.gamePlayers;
     const activePayloads = nextPayloads.filter((payload) =>
-      currentPlayers.some((player) => player.id === payload.playerId),
+      payload.turnId === latest.syncTurnId && currentPlayers.some((player) => player.id === payload.playerId),
     );
     const allReady =
       currentPlayers.length > 0 &&
       currentPlayers.every((player) =>
         activePayloads.some((payload) => payload.playerId === player.id && payload.turnId === latest.syncTurnId),
       );
-    const nextPhase: SyncPhase = allReady ? "readyToAdvance" : "turn";
 
-    syncLatestState({ syncReadyPayloads: activePayloads, syncPhase: nextPhase });
+    // The last Ready payload finalizes the turn immediately; there is no between-turn phase.
+    if (allReady) {
+      commitSyncReadyPayloads(activePayloads);
+      return;
+    }
+
+    syncLatestState({ syncReadyPayloads: activePayloads, syncPhase: "turn" });
     setSyncReadyPayloads(activePayloads);
-    setSyncPhase(nextPhase);
+    setSyncPhase("turn");
     hostTransportRef.current?.broadcast({
       type: "readyStatus",
-      phase: nextPhase,
+      phase: "turn",
       payloads: activePayloads,
     });
   }
@@ -1851,15 +1854,12 @@ function App() {
     setRollAnimationKey(0);
   }
 
-  function advanceSyncTurn() {
-    if (!advanceEnabled) {
-      return;
-    }
-
-    const closedRows = uniqueRows(syncReadyPayloads.flatMap((payload) => payload.closedRows));
-    const committed = commitLocalTurnState(rows, penalties, turn);
+  function commitSyncReadyPayloads(activePayloads: SyncReadyPayload[]) {
+    const latest = latestRef.current;
+    const closedRows = uniqueRows(activePayloads.flatMap((payload) => payload.closedRows));
+    const committed = commitLocalTurnState(latest.rows, latest.penalties, latest.turn);
     const withGlobalClosures = applyGlobalClosedRows(committed.rows, closedRows);
-    const anyPenaltyGameOver = syncReadyPayloads.some((payload) => payload.reachedFourPenalties);
+    const anyPenaltyGameOver = activePayloads.some((payload) => payload.reachedFourPenalties);
     const rowPenaltyState = getGameOverFromRowsAndPenalties(
       withGlobalClosures,
       committed.penalties,
@@ -1867,7 +1867,7 @@ function App() {
     );
     const nextGameOver = rowPenaltyState.gameOver;
     const nextReason = rowPenaltyState.gameOverReason;
-    const nextIndex = nextGameOver ? currentPlayerIndex : (currentPlayerIndex + 1) % gamePlayers.length;
+    const nextIndex = nextGameOver ? latest.currentPlayerIndex : (latest.currentPlayerIndex + 1) % latest.gamePlayers.length;
     const nextTurn = nextTurnId();
     const nextEmptyTurn = createEmptyTurn();
 
@@ -1897,7 +1897,7 @@ function App() {
       gameOver: nextGameOver,
       gameOverReason: nextReason,
       nextTurnId: nextTurn,
-      players: gamePlayers,
+      players: latest.gamePlayers,
     });
   }
 
@@ -2556,7 +2556,7 @@ function App() {
 
             {mode === "sync" ? (
               <div className="sync-play-strip">
-                <span>{syncPhase === "readyToAdvance" ? "Ready" : isLocalReady ? "Done" : "Sync"}</span>
+                <span>{isLocalReady ? "Done" : "Sync"}</span>
                 <span>
                   {readyPlayerIds.length}/{gamePlayers.length}
                 </span>
@@ -2613,11 +2613,11 @@ function App() {
             <button
               className="primary turn-action-button"
               type="button"
-              onClick={mode === "sync" ? (syncPhase === "readyToAdvance" ? advanceSyncTurn : readySyncTurn) : commitTurn}
-              disabled={mode === "sync" ? (syncPhase === "readyToAdvance" ? !advanceEnabled : !readyEnabled) : !nextEnabled}
-              aria-label={mode === "sync" ? (syncPhase === "readyToAdvance" ? "Advance" : "Ready") : "Next"}
+              onClick={mode === "sync" ? readySyncTurn : commitTurn}
+              disabled={mode === "sync" ? !readyEnabled : !nextEnabled}
+              aria-label={mode === "sync" ? "Ready" : "Next"}
             >
-              {mode === "sync" && syncPhase !== "readyToAdvance" ? <Check size={23} /> : <ArrowRight size={23} />}
+              {mode === "sync" ? <Check size={23} /> : <ArrowRight size={23} />}
             </button>
           </div>
 
