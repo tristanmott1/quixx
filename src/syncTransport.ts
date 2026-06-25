@@ -238,7 +238,7 @@ function parseCompactPayload(value: string) {
   return null;
 }
 
-function parsePayload(value: string) {
+function parseQrPayload(value: string) {
   try {
     const compactPayload = parseCompactPayload(value);
 
@@ -251,6 +251,14 @@ function parsePayload(value: string) {
       return decompressed ? (JSON.parse(decompressed) as unknown) : null;
     }
 
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function parseWireMessage(value: string) {
+  try {
     return JSON.parse(value) as unknown;
   } catch {
     return null;
@@ -315,7 +323,7 @@ function attachMessageHandler(
       return;
     }
 
-    const message = parsePayload(event.data);
+    const message = parseWireMessage(event.data);
     if (!message || typeof message !== "object" || typeof (message as SyncWireMessage).type !== "string") {
       return;
     }
@@ -333,12 +341,12 @@ function sendChannelMessage(channel: RTCDataChannel, message: SyncWireMessage) {
 }
 
 export function parseSyncOffer(value: string) {
-  const payload = parsePayload(value);
+  const payload = parseQrPayload(value);
   return isOfferPayload(payload) ? payload : null;
 }
 
 export function parseSyncAnswer(value: string) {
-  const payload = parsePayload(value);
+  const payload = parseQrPayload(value);
   return isAnswerPayload(payload) ? payload : null;
 }
 
@@ -409,6 +417,16 @@ export class SyncHostTransport {
       throw new Error("this answer does not match the current host QR.");
     }
 
+    attachMessageHandler(pending.channel, answer.playerId, this.callbacks);
+
+    try {
+      await pending.peerConnection.setRemoteDescription(answer.sdp);
+      await waitForChannelOpen(pending.channel);
+    } catch (error) {
+      this.closePendingOffer(answer.offerId);
+      throw error;
+    }
+
     this.pendingOffers.delete(answer.offerId);
     this.peers.set(answer.playerId, {
       channel: pending.channel,
@@ -416,8 +434,7 @@ export class SyncHostTransport {
       playerName: answer.playerName,
     });
 
-    attachMessageHandler(pending.channel, answer.playerId, this.callbacks);
-    pending.channel.addEventListener("open", () => this.callbacks.onPeerOpen?.(answer.playerId));
+    this.callbacks.onPeerOpen?.(answer.playerId);
     pending.channel.addEventListener("close", () => this.callbacks.onPeerClosed?.(answer.playerId));
     pending.peerConnection.addEventListener("connectionstatechange", () => {
       if (
@@ -428,9 +445,6 @@ export class SyncHostTransport {
         this.callbacks.onPeerClosed?.(answer.playerId);
       }
     });
-
-    await pending.peerConnection.setRemoteDescription(answer.sdp);
-    await waitForChannelOpen(pending.channel);
 
     return {
       id: answer.playerId,

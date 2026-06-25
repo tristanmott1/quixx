@@ -103,7 +103,15 @@ When the user chooses Host:
 - The host creates a sync room.
 - The host shows a QR code containing the host WebRTC offer.
 - The host can scan joiner answer QR codes to complete each connection.
+- While the host is accepting an answer QR, the host is in a pending handshake state.
+- While an answer handshake is pending, the host Start button must be disabled.
+- While an answer handshake is pending, the host Scan button must be disabled so only one answer is processed at a time.
 - Joined players are added automatically using the name they entered on their own device.
+- A joining player is added only after the WebRTC data channel has opened successfully.
+- A decoded answer QR that fails to open a WebRTC data channel must not add a player.
+- A decoded answer QR that fails to open a WebRTC data channel must not leave a half-connected peer in the host transport.
+- A decoded answer QR that fails to open a WebRTC data channel must show a visible host-side failure message before the host can start.
+- After a failed answer handshake, the host should receive or create a fresh host QR so the joiner can retry cleanly.
 - The default order is host first, followed by join order.
 - Before starting, the host can rearrange player order and randomize player order.
 - Host lobby controls should show Randomize on the left and Scan on the right.
@@ -148,6 +156,19 @@ QR scan usability requirements:
 - Camera access failure should remain separate as `Camera unavailable`.
 - Third-party scanner libraries are a future fallback if compact QR payloads and explicit status messages are still unreliable.
 
+QR handshake gating requirements:
+
+- "QR found" means only that the camera decoded a QR code.
+- "Creating answer" means the joiner parsed a host offer and is building a local WebRTC answer.
+- "Answer ready" means the joiner created an answer QR, but it does not yet mean the joiner is connected.
+- "Accepting answer" means the host parsed an answer QR and is trying to open the data channel.
+- A player is connected only when the data channel opens.
+- The host must not treat a decoded answer QR as a joined player before the data channel opens.
+- The host must not allow the game to start while an answer QR is being accepted.
+- If the data channel does not open, the host should show a connection failure message immediately in the lobby.
+- If the data channel does not open, the joiner should remain on the answer QR screen unless the host ends the session or the user cancels.
+- Failed answer attempts should be recoverable by scanning a fresh host QR and generating a fresh answer QR.
+
 ## Sync Mode Network Model
 
 Sync mode uses local WebRTC data channels between the host and each joined player.
@@ -177,13 +198,19 @@ Sync mode should send small events instead of syncing entire private score cards
 
 Shared event messages should include a `turnId` whenever they apply to a turn. Devices must ignore stale turn-scoped messages from earlier turns.
 
+Turn-finalizing sync messages should include both:
+
+- The completed `turnId` being finalized.
+- The next `turnId` that should be used after the advance.
+
+Devices must ignore an automatic advance result when the completed `turnId` does not match the device's current turn.
+
 ### Sync Event Categories
 
 Host-to-player events include:
 
 - Lobby state.
 - Game start.
-- Turn start.
 - Dice roll result.
 - Ready status summary.
 - Automatic advance result.
@@ -208,14 +235,31 @@ Any sync callback that needs current play state should read from the latest-stat
 
 ### Sync Phases
 
-Sync mode has explicit shared phases:
+Sync mode should keep setup state and active game state simple.
 
-- `lobby`: players are joining, host can reorder/randomize, host can start.
-- `turn`: one player is current, dice are rolled, players make private selections, and all active players press Ready before the turn advances automatically.
-- `gameOver`: final shared game state is visible.
-- `ended`: sync session has ended because the host disconnected, the host ended the session, or the local player exited.
+The app should not keep unused sync phases.
 
-The app should not infer these phases from scattered state flags.
+The target sync phase set is:
+
+- `idle`: no active sync setup or session.
+- `hostLobby`: host is creating/scanning QR codes and managing the pre-game player list.
+- `showAnswer`: joiner has scanned a host QR and is showing an answer QR.
+- `lobby`: joiner is connected and waiting for the host to start.
+- `turn`: synced game is active and a turn is in progress.
+- `gameOver`: final shared Qwixx game state is visible.
+
+The app should delete stale or unused phases:
+
+- `scanOffer` should not exist as a stored phase if scanning is already represented by camera modal state.
+- `ended` should not exist as a stored phase if ended sessions return to `idle` with a visible message.
+
+Session-ended state should be represented by:
+
+- `syncPhase: "idle"`.
+- Sync tab selected.
+- A visible ended-session message such as `Ended`, `Removed`, or `Host disconnected`.
+
+The app should not infer active game phases from scattered state flags.
 
 ### Permanent Host
 
@@ -733,6 +777,16 @@ When all active players are Ready:
 
 If the current player is the last active player, wrap to the first active player. There are no rounds to configure.
 
+Automatic advance result requirements:
+
+- The host must broadcast the completed `turnId`.
+- The host must broadcast the next `turnId`.
+- Joiners must ignore an advance result whose completed `turnId` does not match their current turn.
+- The host must build row-closure metadata from the active Ready payloads for the completed turn.
+- The host must build 4-penalty metadata from the active Ready payloads for the completed turn.
+- The host must apply and broadcast the same row-closure and 4-penalty metadata.
+- Joiners must apply the metadata from the host rather than recomputing shared results from private assumptions.
+
 ## Undo Button
 
 Undo reverses exactly the most recent undoable user action in the current mode.
@@ -915,7 +969,6 @@ Suggested storage keys:
 - `qwixx.showHints.v1`
 - `qwixx.activeGame.v1`
 - `qwixx.syncName.v1`
-- `qwixx.syncLocalState.v1`
 
 Restoring the app in local mode should resume the active game as it appeared before refresh or app close.
 
@@ -924,6 +977,163 @@ Local Exit clears the active game state but keeps roster and selected user playe
 Local Start over replaces the active game state with a fresh game using the current game players and selected user player.
 
 Sync Exit clears the local sync session state. Host Start over replaces the synced game state with a fresh game using the current connected players and order.
+
+## Hardening And Simplification Pass
+
+The next implementation pass should make the app simpler and stronger by deleting stale state paths and replacing duplicated logic with smaller single-purpose helpers.
+
+The goal is less code and tighter gates, not a larger architecture.
+
+### Handshake Gate Cleanup
+
+Problem to fix:
+
+- The host can currently recognize an answer QR and continue toward Start before the WebRTC data channel has actually opened.
+- A valid answer QR can fail because devices are not on the same local network.
+- That failure must be visible before the host starts the game.
+
+Required changes:
+
+- Add one explicit pending-answer state for the host, such as `isAcceptingAnswer`.
+- Set the pending-answer state to true immediately after the host scans an answer QR.
+- Clear the pending-answer state in both success and failure paths.
+- Disable host Start while the pending-answer state is true.
+- Disable host Scan while the pending-answer state is true.
+- Keep the host in the lobby while the pending answer is being accepted.
+- Show the host-side failure message in the lobby when answer acceptance fails.
+- Do not add a player to the host lobby until the data channel opens.
+- Do not broadcast lobby state for a player until that player is fully connected.
+- After a failed answer acceptance, create or require a fresh host QR before retrying.
+
+Transport requirements:
+
+- `SyncHostTransport.acceptAnswer` should keep the answer in the pending-offer collection until the channel opens.
+- `SyncHostTransport.acceptAnswer` should move a peer from pending to connected only after `setRemoteDescription` succeeds and `waitForChannelOpen` resolves.
+- If `setRemoteDescription` or `waitForChannelOpen` fails, the pending offer should be closed and removed.
+- Failed answer acceptance should not leave a peer in the connected peer map.
+- Failed answer acceptance should not leave a stale pending offer that appears usable.
+- Broadcasting should only send to opened channels.
+
+### Sync Phase Cleanup
+
+Problem to fix:
+
+- Sync phase currently includes stale or unused values.
+- Some values describe setup UI state while others describe active shared game state.
+
+Required changes:
+
+- Delete `scanOffer` from the stored sync phase type.
+- Delete `ended` from the stored sync phase type.
+- Keep ended-session display as `idle` plus a message.
+- Keep scanner state in `syncCameraMode`, not in `syncPhase`.
+- Keep the target sync phase values limited to `idle`, `hostLobby`, `showAnswer`, `lobby`, `turn`, and `gameOver`.
+- Update tests so they verify the remaining phase behavior rather than guarding stale deleted names.
+
+### Legal Mark Helper Cleanup
+
+Problem to fix:
+
+- Legal score-card enablement and legal hint roles are calculated by two helpers that walk the same candidate marks.
+- This creates a risk that a tile is enabled by one rule path but hinted by another.
+
+Required changes:
+
+- Replace separate legal-key and legal-role scans with one helper that returns `Map<string, Set<MarkRole>>`.
+- Use the map keys for enabled score-card tiles.
+- Use the map values for hint roles.
+- Keep all rule behavior unchanged:
+  - Non-current sync/local opponent turns may choose at most one white-sum number.
+  - Current-player turns may choose valid white and/or mixed interpretations.
+  - Same-row two-mark moves still require the white interpretation to be visually first.
+  - Different-row two-mark moves do not require click order.
+  - Penalty selection still disables number selection.
+- Delete the old duplicate helper after the combined helper is in place.
+
+### Play-State Commit Cleanup
+
+Problem to fix:
+
+- Several code paths manually set the same play-state fields and latest sync snapshot fields.
+- Manual repeated state commits make it easy to forget one field when adding future sync behavior.
+
+Required changes:
+
+- Add one small helper for applying a complete play-state patch.
+- The helper should update React state and the latest sync snapshot together when relevant.
+- The helper should stay simple and local to `App.tsx`; do not add a reducer or state library.
+- Use the helper in:
+  - Local game start.
+  - Sync play start.
+  - Sync advance result application.
+  - Host automatic sync advance.
+  - Sync turn discard.
+  - Sync session end.
+  - Local/sync exit reset when practical.
+- Keep user-visible behavior unchanged.
+- Delete repeated manual setter blocks only after the helper covers the same fields clearly.
+
+### Sync Wire Parser Cleanup
+
+Problem to fix:
+
+- QR payload parsing and WebRTC data-channel message parsing share the same broad parser path.
+- Those are different pipelines and should not need to understand each other's formats.
+
+Required changes:
+
+- Keep compact QR parsing for `QWO:` host offers and `QWA:` join answers.
+- Keep legacy `qwixx:` QR parsing only for QR payload compatibility.
+- Parse data-channel messages as plain JSON wire messages.
+- Do not attempt to parse QR compact payloads from data-channel messages.
+- Keep outgoing data-channel messages as JSON.
+- Keep outgoing QR payloads compact and QR-alphanumeric-safe.
+
+### Automatic Advance TurnId Cleanup
+
+Problem to fix:
+
+- The advance result should explicitly identify the turn being finalized as well as the next turn.
+
+Required changes:
+
+- Add completed `turnId` to `advanceResult`.
+- Keep `nextTurnId` for the next turn.
+- Host should send both fields.
+- Host and joiners should apply the advance only if completed `turnId` matches the current sync turn.
+- Stale `advanceResult` messages should be ignored.
+- Existing row-closure and 4-penalty metadata should stay unchanged.
+
+### Persistence Documentation Cleanup
+
+Problem to fix:
+
+- The spec listed a sync local-state storage key that is not currently implemented.
+
+Required changes:
+
+- Do not list storage keys that are not used by the app.
+- If sync private persistence is added later, document the exact data shape and behavior before adding a new key.
+
+### Verification Cleanup
+
+Problem to fix:
+
+- The UI verifier includes useful runtime checks, but also relies on many source-string assertions.
+- Source-string assertions are brittle when the code is intentionally reorganized.
+
+Required changes:
+
+- Keep source checks only for high-level deletion guards that are hard to test otherwise.
+- Prefer runtime checks for behavior.
+- Add a transport-level test where a host decodes an answer QR but the channel fails to open.
+- Verify the failed answer attempt does not add a player.
+- Verify Start is disabled while the host is accepting an answer.
+- Verify a failed answer attempt leaves the host in lobby with a visible failure message.
+- Verify a successful answer attempt adds the player only after the channel opens.
+- Verify stale `advanceResult` messages are ignored when their completed `turnId` does not match.
+- Keep existing QR compact-prefix checks.
+- Keep existing local play, undo, sync ready, and auto-advance smoke checks.
 
 ## PWA and Deployment
 

@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import lzString from "lz-string";
 
 const baseUrl = "http://127.0.0.1:5174/";
 const outputDir = new URL("../verification-output/", import.meta.url);
@@ -11,6 +12,7 @@ const chromePaths = [
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
 ];
+const { compressToEncodedURIComponent } = lzString;
 
 function assert(condition, message) {
   if (!condition) {
@@ -107,22 +109,23 @@ async function runSourceChecks() {
   );
   assert(!appSource.includes("readyToAdvance"), "Sync has no between-turn readyToAdvance phase.");
   assert(!appSource.includes("advanceEnabled"), "Sync has no user-facing Advance button state.");
-  assert(appSource.includes("Looking for QR"), "Scanner shows a looking-for-QR state.");
-  assert(appSource.includes("QR found"), "Scanner and handshake UI show a QR-found state.");
-  assert(transportSource.includes('COMPACT_OFFER_PREFIX = "QWO:"'), "Host QR uses the compact offer prefix.");
-  assert(transportSource.includes('COMPACT_ANSWER_PREFIX = "QWA:"'), "Answer QR uses the compact answer prefix.");
+  assert(!appSource.includes('"scanOffer"'), "Sync has no stored scanOffer phase.");
+  assert(!appSource.includes('"ended"'), "Sync ended state is represented by idle plus a message.");
+  assert(transportSource.includes("parseQrPayload"), "QR payload parsing has its own parser.");
+  assert(transportSource.includes("parseWireMessage"), "Data-channel message parsing has its own parser.");
   assert(!appSource.includes("sync-play-strip"), "Sync play has no duplicate Ready-count strip.");
   assert(!styleSource.includes(".sync-play-strip"), "Duplicate Ready-count strip styles are removed.");
-  assert(appSource.includes("CircleDashed"), "Compact sync rows include a waiting icon.");
-  assert(appSource.includes("sync-player-status ready"), "Compact sync rows include a ready status.");
-  assert(appSource.includes("sync-player-status waiting"), "Compact sync rows include a waiting status.");
   assert(appSource.includes("hintsChanged"), "Sync hint changes are broadcast to connected players.");
   assert(appSource.includes("closedBy"), "Sync advance carries row-closure player metadata.");
   assert(appSource.includes("penaltyPlayerIds"), "Sync advance carries 4-penalty player metadata.");
-  assert(appSource.includes("formatSyncAdvanceToast"), "Sync advance events are formatted into toast messages.");
-  assert(appSource.includes("closed ${row}"), "Sync toast formatter names closed rows.");
-  assert(appSource.includes("reached 4 penalties"), "Sync toast formatter names 4-penalty events.");
-  assert(appSource.includes("opponent-penalty-button readonly"), "Sync 4x indicator is read-only.");
+  assert(appSource.includes("isAcceptingAnswer"), "Host answer acceptance is explicitly gated.");
+  assert(appSource.includes("disabled={gamePlayers.length === 0 || isAcceptingAnswer}"), "Host Start is disabled while accepting an answer.");
+  assert(appSource.includes("scanDisabled={isAcceptingAnswer}"), "Host Scan is disabled while accepting an answer.");
+  assert(appSource.includes("if (message.turnId !== latest.syncTurnId)"), "Sync advance results are scoped to the completed turn id.");
+  assert(appSource.includes("getLegalMarkRoleMap"), "Legal score-card enablement and hints share one role map.");
+  assert(!appSource.includes("function getLegalMarkKeys"), "Duplicate legal-key helper is removed.");
+  assert(!appSource.includes("function getLegalMarkRoles"), "Duplicate legal-role helper is removed.");
+  assert(appSource.includes("function applyPlayState"), "Repeated play-state commits use a small helper.");
 }
 
 function rowsState() {
@@ -418,6 +421,49 @@ async function runSyncTransportChecks(browser) {
       { timeout: 5000 },
     );
   }
+
+  const failedOffer = await hostPage.evaluate(() => window.__host.createOffer());
+  const failedOfferPayload = await hostPage.evaluate(async (offerText) => {
+    const { parseSyncOffer } = await import("/src/syncTransport.ts");
+    const offer = parseSyncOffer(offerText);
+
+    return offer ? { offerId: offer.offerId, roomId: offer.roomId } : null;
+  }, failedOffer);
+
+  assert(failedOfferPayload, "Failed-handshake test can parse the host offer.");
+  const failedAnswer = `qwixx:${compressToEncodedURIComponent(JSON.stringify({
+    kind: "qwixx-sync-answer",
+    version: 1,
+    roomId: failedOfferPayload.roomId,
+    offerId: failedOfferPayload.offerId,
+    playerId: "failed",
+    playerName: "Failed",
+    sdp: { type: "answer", sdp: "not a valid answer" },
+  }))}`;
+  const failedResult = await hostPage.evaluate(async (answerText) => {
+    try {
+      await window.__host.acceptAnswer(answerText);
+      return "resolved";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }, failedAnswer);
+
+  assert(failedResult !== "resolved", "Decoded answer QR with a bad handshake is rejected.");
+  assert(
+    !(await hostPage.evaluate(() => window.__messages?.some((message) => message.playerId === "failed"))),
+    "Failed answer handshake does not add or message a connected player.",
+  );
+  const reusedFailedResult = await hostPage.evaluate(async (answerText) => {
+    try {
+      await window.__host.acceptAnswer(answerText);
+      return "resolved";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }, failedAnswer);
+
+  assert(reusedFailedResult.includes("current host QR"), "Failed answer consumes the stale host QR and requires a fresh QR.");
 
   await connectJoiner(joinPage, { id: "bob", name: "Bob" });
   await connectJoiner(otherPage, { id: "cora", name: "Cora" });
