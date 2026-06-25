@@ -124,11 +124,13 @@ This two-way QR handshake is required for the offline PWA approach. The app shou
 QR scan usability requirements:
 
 - QR codes should render large enough to scan reliably on a phone screen.
+- QR codes should render as crisp vector output, not as raster images that can blur when scaled.
 - QR codes should include a clear quiet margin.
 - QR payloads should stay compressed to reduce visual density.
 - The scanner should request the rear camera at high resolution when available.
 - The scanner should prefer native browser QR detection when available.
 - The scanner should fall back to app-level QR decoding when native detection is unavailable.
+- The scanner should decode the visible square scanner frame rather than the full camera frame.
 - The scanner should request continuous focus when the browser exposes it.
 - The scanner should offer a torch toggle when the camera exposes torch support.
 

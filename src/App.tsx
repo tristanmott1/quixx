@@ -2998,20 +2998,20 @@ function SyncLobby({
 }
 
 function QrPanel({ label, text }: { label: string; text: string }) {
-  const [image, setImage] = useState("");
+  const [svg, setSvg] = useState("");
 
   useEffect(() => {
     let alive = true;
 
-    QRCode.toDataURL(text, { errorCorrectionLevel: "L", margin: 3, width: 380 })
-      .then((nextImage) => {
+    QRCode.toString(text, { errorCorrectionLevel: "L", margin: 4, type: "svg" })
+      .then((nextSvg) => {
         if (alive) {
-          setImage(nextImage);
+          setSvg(nextSvg.replace("<svg ", '<svg shape-rendering="crispEdges" '));
         }
       })
       .catch(() => {
         if (alive) {
-          setImage("");
+          setSvg("");
         }
       });
 
@@ -3023,7 +3023,7 @@ function QrPanel({ label, text }: { label: string; text: string }) {
   return (
     <div className="qr-panel">
       <span>{label}</span>
-      {image ? <img src={image} alt={label} /> : <div className="qr-placeholder" />}
+      {svg ? <div className="qr-code" role="img" aria-label={label} dangerouslySetInnerHTML={{ __html: svg }} /> : <div className="qr-placeholder" />}
     </div>
   );
 }
@@ -3048,6 +3048,7 @@ function QrScanner({
   useEffect(() => {
     let frame = 0;
     let stream: MediaStream | null = null;
+    const scanSize = 1024;
     const detectorConstructor = (window as unknown as { BarcodeDetector?: BarcodeDetectorConstructor }).BarcodeDetector;
     let detector: BarcodeDetectorInstance | null = null;
 
@@ -3121,12 +3122,16 @@ function QrScanner({
       }
 
       if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0 && video.videoHeight > 0) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+        const sourceSize = Math.min(video.videoWidth, video.videoHeight);
+        const sourceX = Math.floor((video.videoWidth - sourceSize) / 2);
+        const sourceY = Math.floor((video.videoHeight - sourceSize) / 2);
+        canvas.width = scanSize;
+        canvas.height = scanSize;
         const context = canvas.getContext("2d", { willReadFrequently: true });
 
         if (context) {
-          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          // Match the visible square scanner frame so decoding ignores the cropped camera edges.
+          context.drawImage(video, sourceX, sourceY, sourceSize, sourceSize, 0, 0, scanSize, scanSize);
           const image = context.getImageData(0, 0, canvas.width, canvas.height);
           const code = await readQrCode(canvas, image);
 

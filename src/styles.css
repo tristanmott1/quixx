@@ -378,12 +378,20 @@ button:focus-visible {
   font-weight: 900;
 }
 
-.qr-panel img,
+.qr-code,
 .qr-placeholder {
-  width: min(100%, 380px);
+  display: grid;
+  width: min(100%, 440px);
   aspect-ratio: 1;
   border-radius: 8px;
   background: #ffffff;
+}
+
+.qr-code svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
 }
 
 .sync-play-strip {

@@ -277,11 +277,11 @@ async function runSyncHostChecks(page) {
   await page.getByRole("button", { name: "Sync" }).click();
   await page.getByLabel("Your name").fill("Alice");
   await page.getByRole("button", { name: "Host" }).click();
-  await page.waitForSelector(".qr-panel img", { timeout: 5000 });
+  await page.waitForSelector(".qr-panel .qr-code", { timeout: 5000 });
   await page.screenshot({ path: outputPath("sync-host-lobby-mobile.png"), fullPage: true });
 
   assert((await page.getByText("Alice").count()) > 0, "Host appears in sync lobby.");
-  assert((await page.locator(".qr-panel img").count()) === 1, "Host QR is generated.");
+  assert((await page.locator(".qr-panel .qr-code").count()) === 1, "Host QR is generated.");
   await page.getByRole("button", { name: "Start" }).click();
   assert((await page.locator(".sum-strip").count()) === 0, "Sync play does not show manual white-sum boxes.");
   assert((await page.getByRole("button", { name: "Opponent reached four penalties" }).count()) === 0, "Sync play hides opponent 4x control.");
