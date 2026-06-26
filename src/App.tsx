@@ -141,6 +141,15 @@ type SyncPlayerScores = Record<string, ScoreSnapshot>;
 
 type SecretDiePress = "top" | "bottom";
 
+type SecretCommandId = "openScores" | "disableScores" | "showUseCounts";
+
+type SecretCommand = {
+  id: SecretCommandId;
+  sequence: SecretDiePress[];
+};
+
+type SecretScoreUseCounts = Record<string, number>;
+
 type BarcodeDetectorResult = {
   rawValue: string;
 };
@@ -185,6 +194,8 @@ type LatestSyncState = {
   showHints: boolean;
   syncHintsLockedOff: boolean;
   syncPlayerScores: SyncPlayerScores;
+  secretScoresDisabled: boolean;
+  secretScoreUseCounts: SecretScoreUseCounts;
   gameScoreCardId: number;
   syncScoreCardId: number | null;
 };
@@ -205,6 +216,8 @@ type PlayStatePatch = {
   showHints?: boolean;
   syncHintsLockedOff?: boolean;
   syncPlayerScores?: SyncPlayerScores;
+  secretScoresDisabled?: boolean;
+  secretScoreUseCounts?: SecretScoreUseCounts;
   gameScoreCardId?: number;
   syncScoreCardId?: number | null;
   rollAnimationKey?: number;
@@ -237,7 +250,11 @@ const SUM_NUMBERS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] as const;
 const SCORE_VALUES = [0, 1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66, 78] as const;
 const MAX_PENALTIES = 4;
 const PENALTY_POINTS = 5;
-const SECRET_SCORE_PASSWORD: SecretDiePress[] = ["top", "bottom", "top", "top", "bottom", "bottom"];
+const SECRET_COMMANDS: SecretCommand[] = [
+  { id: "openScores", sequence: ["top", "bottom", "top", "top", "bottom", "bottom"] },
+  { id: "disableScores", sequence: ["top", "top", "top", "bottom", "bottom", "bottom", "top", "bottom"] },
+  { id: "showUseCounts", sequence: ["bottom", "bottom", "top", "bottom", "bottom", "top"] },
+];
 
 const DICE_LAYOUT = [
   { key: "whiteA", color: "white", row: 1, column: 1 },
@@ -395,6 +412,34 @@ function cloneScoreSnapshot(snapshot: ScoreSnapshot): ScoreSnapshot {
 
 function cloneSyncPlayerScores(scores: SyncPlayerScores): SyncPlayerScores {
   return Object.fromEntries(Object.entries(scores).map(([playerId, snapshot]) => [playerId, cloneScoreSnapshot(snapshot)]));
+}
+
+function secretSequenceMatches(presses: SecretDiePress[], sequence: SecretDiePress[]) {
+  return presses.length === sequence.length && presses.every((press, index) => press === sequence[index]);
+}
+
+function secretSequenceIsPrefix(presses: SecretDiePress[], sequence: SecretDiePress[]) {
+  return presses.length <= sequence.length && presses.every((press, index) => press === sequence[index]);
+}
+
+function normalizeSecretScoreUseCounts(value: unknown): SecretScoreUseCounts {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([playerId]) => playerId.length > 0)
+      .map(([playerId, count]) => {
+        const numericCount = Number(count);
+        return [playerId, Number.isFinite(numericCount) ? Math.max(0, Math.floor(numericCount)) : 0];
+      }),
+  );
+}
+
+function removePlayerUseCount(counts: SecretScoreUseCounts, playerId: string): SecretScoreUseCounts {
+  const { [playerId]: _removed, ...remaining } = counts;
+  return remaining;
 }
 
 function cloneTurnCore(turn: TurnCore): TurnCore {
@@ -1361,6 +1406,9 @@ function App() {
   const [syncPenaltyPlayerIds, setSyncPenaltyPlayerIds] = useState<string[]>([]);
   const [syncToastMessage, setSyncToastMessage] = useState("");
   const [syncPlayerScores, setSyncPlayerScores] = useState<SyncPlayerScores>({});
+  const [secretScoresDisabled, setSecretScoresDisabled] = useState(false);
+  const [secretScoreUseCounts, setSecretScoreUseCounts] = useState<SecretScoreUseCounts>({});
+  const [secretUseCountsOpen, setSecretUseCountsOpen] = useState(false);
   const [gamePlayers, setGamePlayers] = useState<Player[]>(savedGame?.players ?? []);
   const [currentPlayerIndex, setCurrentPlayerIndex] = useState(savedGame?.currentPlayerIndex ?? 0);
   const [rows, setRows] = useState<RowsState>(savedGame?.rows ?? createEmptyRows);
@@ -1375,7 +1423,7 @@ function App() {
   const [syncHintsLockedOff, setSyncHintsLockedOff] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"rollUndo" | "exit" | "startOver" | null>(null);
   const [draggingPlayerId, setDraggingPlayerId] = useState<string | null>(null);
-  const [secretProgress, setSecretProgress] = useState(0);
+  const [secretPresses, setSecretPresses] = useState<SecretDiePress[]>([]);
   const [secretScoreTurnId, setSecretScoreTurnId] = useState<string | null>(null);
   const [rollAnimationKey, setRollAnimationKey] = useState(0);
   const draftNameInputRef = useRef<HTMLInputElement>(null);
@@ -1398,6 +1446,8 @@ function App() {
     showHints,
     syncHintsLockedOff,
     syncPlayerScores,
+    secretScoresDisabled,
+    secretScoreUseCounts,
     gameScoreCardId,
     syncScoreCardId,
   });
@@ -1445,10 +1495,14 @@ function App() {
     mode === "local"
       ? gameOverReason !== "opponentPenalties" && (turn.history.length > 0 || undoStack.length > 0)
       : syncPhase === "turn" && !isLocalReady && turn.history.length > 0;
-  const canEnterSecretScorePassword =
+  const canEnterSecretCommand =
     isSyncMode &&
     page === "play" &&
     (syncPhase === "gameOver" || (syncPhase === "turn" && (!isUserTurn || Boolean(turn.roll))));
+  const secretUseCountEntries = gamePlayers.map((player) => ({
+    player,
+    count: secretScoreUseCounts[player.id] ?? 0,
+  }));
 
   function syncLatestState(updates: Partial<LatestSyncState>) {
     latestRef.current = { ...latestRef.current, ...updates };
@@ -1503,6 +1557,14 @@ function App() {
 
     if ("syncPlayerScores" in patch && patch.syncPlayerScores) {
       latestUpdates.syncPlayerScores = patch.syncPlayerScores;
+    }
+
+    if ("secretScoresDisabled" in patch && typeof patch.secretScoresDisabled === "boolean") {
+      latestUpdates.secretScoresDisabled = patch.secretScoresDisabled;
+    }
+
+    if ("secretScoreUseCounts" in patch && patch.secretScoreUseCounts) {
+      latestUpdates.secretScoreUseCounts = patch.secretScoreUseCounts;
     }
 
     if ("gameScoreCardId" in patch && typeof patch.gameScoreCardId === "number") {
@@ -1577,6 +1639,14 @@ function App() {
       setSyncPlayerScores(patch.syncPlayerScores);
     }
 
+    if ("secretScoresDisabled" in patch && typeof patch.secretScoresDisabled === "boolean") {
+      setSecretScoresDisabled(patch.secretScoresDisabled);
+    }
+
+    if ("secretScoreUseCounts" in patch && patch.secretScoreUseCounts) {
+      setSecretScoreUseCounts(patch.secretScoreUseCounts);
+    }
+
     if ("gameScoreCardId" in patch && typeof patch.gameScoreCardId === "number") {
       setGameScoreCardId(patch.gameScoreCardId);
     }
@@ -1601,8 +1671,8 @@ function App() {
     clearSyncToast();
   }
 
-  function resetSecretProgress() {
-    setSecretProgress(0);
+  function resetSecretPresses() {
+    setSecretPresses([]);
   }
 
   function showSyncToast(message: string) {
@@ -1629,23 +1699,89 @@ function App() {
     showSyncToast(formatSyncAdvanceToast(scoreCard, closedBy, penaltyPlayerIds, playersForNames));
   }
 
-  function enterSecretDie(press: SecretDiePress) {
-    if (!canEnterSecretScorePassword) {
-      resetSecretProgress();
+  function getAvailableSecretCommands() {
+    return SECRET_COMMANDS.filter((command) => command.id !== "openScores" || !secretScoresDisabled);
+  }
+
+  function noteSecretScoreUse(playerId: string | null) {
+    const latest = latestRef.current;
+
+    if (!playerId || !latest.gamePlayers.some((player) => player.id === playerId)) {
       return;
     }
 
-    const expected = SECRET_SCORE_PASSWORD[secretProgress];
-    const nextProgress = press === expected ? secretProgress + 1 : press === SECRET_SCORE_PASSWORD[0] ? 1 : 0;
+    if (latest.syncRole === "host") {
+      const nextCounts = {
+        ...latest.secretScoreUseCounts,
+        [playerId]: (latest.secretScoreUseCounts[playerId] ?? 0) + 1,
+      };
 
-    if (nextProgress >= SECRET_SCORE_PASSWORD.length) {
-      resetSecretProgress();
+      applyPlayState({ secretScoreUseCounts: nextCounts });
+      hostTransportRef.current?.broadcast({ type: "secretScoreUseCounts", counts: nextCounts });
+      return;
+    }
+
+    joinTransportRef.current?.send({ type: "secretScoreUsed", playerId });
+  }
+
+  function applySecretScoresDisabled(disabled: boolean) {
+    applyPlayState({ secretScoresDisabled: disabled });
+  }
+
+  function disableSecretScores() {
+    applySecretScoresDisabled(true);
+    showSyncToast("Secret scores disabled");
+
+    if (isHost) {
+      hostTransportRef.current?.broadcast({ type: "secretScoresDisabled", disabled: true });
+      return;
+    }
+
+    joinTransportRef.current?.send({ type: "secretScoresDisabled", disabled: true, playerId: selectedPlayerId });
+  }
+
+  function runSecretCommand(commandId: SecretCommandId) {
+    if (commandId === "openScores") {
+      if (secretScoresDisabled) {
+        return;
+      }
+
+      noteSecretScoreUse(selectedPlayerId);
       setSecretScoreTurnId(syncTurnId);
       setPage("secretScores");
       return;
     }
 
-    setSecretProgress(nextProgress);
+    if (commandId === "disableScores") {
+      disableSecretScores();
+      return;
+    }
+
+    setSecretUseCountsOpen(true);
+  }
+
+  function enterSecretDie(press: SecretDiePress) {
+    if (!canEnterSecretCommand) {
+      resetSecretPresses();
+      return;
+    }
+
+    const commands = getAvailableSecretCommands();
+    const nextPresses = [...secretPresses, press];
+    const exactCommand = commands.find((command) => secretSequenceMatches(nextPresses, command.sequence));
+
+    if (exactCommand) {
+      resetSecretPresses();
+      runSecretCommand(exactCommand.id);
+      return;
+    }
+
+    if (commands.some((command) => secretSequenceIsPrefix(nextPresses, command.sequence))) {
+      setSecretPresses(nextPresses);
+      return;
+    }
+
+    setSecretPresses(commands.some((command) => secretSequenceIsPrefix([press], command.sequence)) ? [press] : []);
   }
 
   function resetSecretOnPlayClick(event: ReactMouseEvent<HTMLDivElement>) {
@@ -1660,12 +1796,12 @@ function App() {
     }
 
     if (target instanceof Element && target.closest("button, input, select, textarea, [role='button']")) {
-      resetSecretProgress();
+      resetSecretPresses();
     }
   }
 
   function closeSecretScores() {
-    resetSecretProgress();
+    resetSecretPresses();
     setSecretScoreTurnId(null);
     setPage("play");
   }
@@ -1735,14 +1871,25 @@ function App() {
   }, [mode, players, selectedPlayerId]);
 
   useEffect(() => {
-    if (page !== "secretScores" || !secretScoreTurnId || secretScoreTurnId === syncTurnId) {
+    if (
+      page !== "secretScores" ||
+      (!secretScoresDisabled && (!secretScoreTurnId || secretScoreTurnId === syncTurnId))
+    ) {
       return;
     }
 
-    resetSecretProgress();
+    resetSecretPresses();
     setSecretScoreTurnId(null);
     setPage("play");
-  }, [page, secretScoreTurnId, syncTurnId]);
+  }, [page, secretScoresDisabled, secretScoreTurnId, syncTurnId]);
+
+  useEffect(() => {
+    if (!secretUseCountsOpen || (mode === "sync" && page === "play")) {
+      return;
+    }
+
+    setSecretUseCountsOpen(false);
+  }, [mode, page, secretUseCountsOpen]);
 
   useEffect(() => {
     if (mode !== "local" || page !== "play" || gamePlayers.length === 0 || !selectedPlayerId) {
@@ -1797,6 +1944,8 @@ function App() {
       showHints,
       syncHintsLockedOff,
       syncPlayerScores,
+      secretScoresDisabled,
+      secretScoreUseCounts,
       gameScoreCardId,
       syncScoreCardId,
     };
@@ -1815,6 +1964,8 @@ function App() {
     showHints,
     syncHintsLockedOff,
     syncPlayerScores,
+    secretScoresDisabled,
+    secretScoreUseCounts,
     gameScoreCardId,
     syncScoreCardId,
   ]);
@@ -1921,6 +2072,8 @@ function App() {
       syncHostPlayerId: null,
       syncHintsLockedOff: false,
       syncPlayerScores: {},
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
       syncScoreCardId: null,
     });
     setMode("local");
@@ -1946,6 +2099,8 @@ function App() {
       syncPhase: "idle",
       syncHintsLockedOff: false,
       syncPlayerScores: {},
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
       syncScoreCardId: null,
       gameScoreCardId: game.scoreCardId,
       selectedPlayerId: nextSelectedPlayerId,
@@ -1970,6 +2125,8 @@ function App() {
       undoStack: [],
       syncReadyPayloads: [],
       syncPlayerScores: {},
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
       rollAnimationKey: 0,
     });
     clearSyncAdvanceFeedback();
@@ -1987,6 +2144,8 @@ function App() {
       syncReadyPayloads: [],
       syncHintsLockedOff: false,
       syncPlayerScores: {},
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
       syncScoreCardId: null,
     });
     setSyncRole(null);
@@ -1995,6 +2154,9 @@ function App() {
     setSyncReadyPayloads([]);
     setSyncHintsLockedOff(false);
     setSyncPlayerScores({});
+    setSecretScoresDisabled(false);
+    setSecretScoreUseCounts({});
+    setSecretUseCountsOpen(false);
     setSyncScoreCardId(null);
     setSyncQrText("");
     setSyncAnswerText("");
@@ -2041,6 +2203,8 @@ function App() {
       syncTurnId: turnId,
       syncReadyPayloads: [],
       syncHintsLockedOff: false,
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
       syncScoreCardId: scoreCardId,
       gameScoreCardId: scoreCardId,
     });
@@ -2147,6 +2311,8 @@ function App() {
         syncTurnId: turnId,
         syncReadyPayloads: [],
         syncHintsLockedOff: false,
+        secretScoresDisabled: false,
+        secretScoreUseCounts: {},
       });
       resetPlayState(
         [
@@ -2184,6 +2350,17 @@ function App() {
 
     if (message.type === "ready") {
       handleSyncReadyMessage(message.payload);
+      return;
+    }
+
+    if (message.type === "secretScoreUsed") {
+      noteSecretScoreUse(playerId);
+      return;
+    }
+
+    if (message.type === "secretScoresDisabled") {
+      applySecretScoresDisabled(true);
+      hostTransportRef.current?.broadcast({ type: "secretScoresDisabled", disabled: true });
       return;
     }
 
@@ -2270,6 +2447,18 @@ function App() {
       return;
     }
 
+    if (message.type === "secretScoreUseCounts") {
+      applyPlayState({ secretScoreUseCounts: normalizeSecretScoreUseCounts(message.counts) });
+      return;
+    }
+
+    if (message.type === "secretScoresDisabled") {
+      if (typeof message.disabled === "boolean") {
+        applySecretScoresDisabled(message.disabled);
+      }
+      return;
+    }
+
     if (message.type === "advanceResult") {
       applySyncAdvanceResult(message);
       return;
@@ -2285,10 +2474,11 @@ function App() {
 
       const nextPlayers = normalizePlayers(message.players);
       const nextPlayerScores = removePlayerScore(latestRef.current.syncPlayerScores, playerId);
+      const nextUseCounts = removePlayerUseCount(latestRef.current.secretScoreUseCounts, playerId);
       if (nextPlayers.length > 0) {
-        applyPlayState({ gamePlayers: nextPlayers, syncPlayerScores: nextPlayerScores });
+        applyPlayState({ gamePlayers: nextPlayers, syncPlayerScores: nextPlayerScores, secretScoreUseCounts: nextUseCounts });
       } else {
-        applyPlayState({ syncPlayerScores: nextPlayerScores });
+        applyPlayState({ syncPlayerScores: nextPlayerScores, secretScoreUseCounts: nextUseCounts });
       }
 
       if (message.discardTurn === true) {
@@ -2351,6 +2541,8 @@ function App() {
       syncPhase: "turn",
       syncReadyPayloads: [],
       syncPlayerScores: {},
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
       showHints: nextShowHints,
       syncHintsLockedOff: nextHintsLockedOff,
       syncScoreCardId: nextScoreCardId,
@@ -2384,6 +2576,8 @@ function App() {
       syncPhase: nextPhase,
       syncReadyPayloads: [],
       syncPlayerScores: {},
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
       syncHintsLockedOff: nextHintsLockedOff,
       syncScoreCardId: nextScoreCardId,
       gameScoreCardId: nextScoreCardId,
@@ -2676,6 +2870,7 @@ function App() {
       gamePlayers: nextPlayers,
       currentPlayerIndex: nextIndex,
       syncPlayerScores: removePlayerScore(latest.syncPlayerScores, playerId),
+      secretScoreUseCounts: removePlayerUseCount(latest.secretScoreUseCounts, playerId),
     });
 
     if (currentPlayerRemoved) {
@@ -2709,6 +2904,8 @@ function App() {
       syncReadyPayloads: [],
       syncPhase: "idle",
       syncPlayerScores: {},
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
       gameOver: false,
       gameOverReason: null,
       undoStack: [],
@@ -2888,6 +3085,8 @@ function App() {
       undoStack: [],
       syncHintsLockedOff: false,
       syncPlayerScores: {},
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
       syncScoreCardId: null,
       gameScoreCardId: scoreCardId,
       rollAnimationKey: 0,
@@ -3482,7 +3681,7 @@ function App() {
                   ? isUserTurn && !gameOver && !turn.roll && syncPhase === "turn"
                   : isUserTurn && !gameOver && !turn.roll
               }
-              secretEnabled={canEnterSecretScorePassword}
+              secretEnabled={canEnterSecretCommand}
               pale={!isUserTurn || isLocalReady}
               onSecretPress={enterSecretDie}
               onRoll={handleRollDice}
@@ -3648,6 +3847,10 @@ function App() {
             </section>
           ))}
         </div>
+      ) : null}
+
+      {secretUseCountsOpen ? (
+        <SecretUseCountsModal entries={secretUseCountEntries} onClose={() => setSecretUseCountsOpen(false)} />
       ) : null}
 
       {confirmAction ? (
@@ -4465,6 +4668,33 @@ function ConfirmModal({
             {copy.confirmLabel}
           </button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function SecretUseCountsModal({
+  entries,
+  onClose,
+}: {
+  entries: { player: Player; count: number }[];
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="confirm-modal secret-usage-modal" role="dialog" aria-modal="true" aria-labelledby="secret-usage-title">
+        <h2 id="secret-usage-title">Uses</h2>
+        <div className="secret-usage-list">
+          {entries.map((entry) => (
+            <div className="secret-usage-row" key={entry.player.id}>
+              <span>{entry.player.name}</span>
+              <strong>{entry.count}</strong>
+            </div>
+          ))}
+        </div>
+        <button className="secondary" type="button" onClick={onClose} aria-label="Close">
+          <X size={18} />
+        </button>
       </section>
     </div>
   );

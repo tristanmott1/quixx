@@ -14,6 +14,9 @@ const chromePaths = [
   "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
 ];
 const { compressToEncodedURIComponent } = lzString;
+const openSecretScoresSequence = ["top", "bottom", "top", "top", "bottom", "bottom"];
+const disableSecretScoresSequence = ["top", "top", "top", "bottom", "bottom", "bottom", "top", "bottom"];
+const showSecretUseCountsSequence = ["bottom", "bottom", "top", "bottom", "bottom", "top"];
 
 function assert(condition, message) {
   if (!condition) {
@@ -159,12 +162,22 @@ async function runSourceChecks() {
   assert(!appSource.includes("function getLegalMarkKeys"), "Duplicate legal-key helper is removed.");
   assert(!appSource.includes("function getLegalMarkRoles"), "Duplicate legal-role helper is removed.");
   assert(appSource.includes("function applyPlayState"), "Repeated play-state commits use a small helper.");
-  assert(appSource.includes('const SECRET_SCORE_PASSWORD'), "Secret score password is stored in source.");
-  assert(appSource.includes('"top", "bottom", "top", "top", "bottom", "bottom"'), "Secret score password matches the agreed sequence.");
+  assert(appSource.includes("const SECRET_COMMANDS"), "Secret commands are stored in one command list.");
+  assert(appSource.includes('{ id: "openScores", sequence: ["top", "bottom", "top", "top", "bottom", "bottom"] }'), "Secret score command matches the agreed sequence.");
+  assert(appSource.includes('{ id: "disableScores", sequence: ["top", "top", "top", "bottom", "bottom", "bottom", "top", "bottom"] }'), "Secret disable command matches the agreed sequence.");
+  assert(appSource.includes('{ id: "showUseCounts", sequence: ["bottom", "bottom", "top", "bottom", "bottom", "top"] }'), "Secret usage command matches the agreed sequence.");
+  assert(appSource.includes("secretPresses"), "Secret command matching uses one shared press buffer.");
+  assert(!appSource.includes("secretProgress"), "Secret command matching does not keep separate progress state.");
   assert(appSource.includes('type Page = "home" | "picker" | "play" | "secretScores"'), "Secret scores use a real app page.");
   assert(appSource.includes("syncPlayerScores"), "Sync mode stores finalized per-player score snapshots.");
   assert(appSource.includes("scoreSnapshot"), "Ready payloads carry player score snapshots.");
   assert(appSource.includes("promoteReadySnapshots"), "Automatic sync advance promotes Ready snapshots.");
+  assert(appSource.includes("secretScoresDisabled"), "Sync mode tracks global secret-score disable state.");
+  assert(appSource.includes("secretScoreUseCounts"), "Sync mode tracks secret-score usage counts.");
+  assert(appSource.includes("secretScoreUsed"), "Joiners report secret score usage to the host.");
+  assert(appSource.includes("secretScoreUseCounts"), "The host broadcasts secret score usage counts.");
+  assert(appSource.includes("secretScoresDisabled"), "The host broadcasts secret score disabled state.");
+  assert(appSource.includes('command.id !== "openScores" || !secretScoresDisabled'), "Secret score command is gated by the global disabled state.");
   assert(appSource.includes("data-secret-die"), "White dice carry hidden secret input hooks.");
   assert(appSource.includes('className="secret-die-target"'), "Secret input uses invisible targets over the white dice.");
   assert(!appSource.includes("data-secret-die={secretPress ?? undefined}"), "Visible dice do not carry secret input hooks.");
@@ -173,12 +186,12 @@ async function runSourceChecks() {
     appSource.includes("syncPhase === \"turn\" && (!isUserTurn || Boolean(turn.roll))"),
     "Opponent-turn secret input is available before the synced roll arrives.",
   );
-  const secretGate = appSource.match(/const canEnterSecretScorePassword =[\s\S]*?;\n\n  function syncLatestState/);
+  const secretGate = appSource.match(/const canEnterSecretCommand =[\s\S]*?;\n\n  function syncLatestState/);
   assert(secretGate && !secretGate[0].includes("!isLocalReady"), "Ready does not block secret score access.");
   assert(appSource.includes("secretScoreTurnId"), "Secret score page tracks the turn it opened on.");
   assert(appSource.includes("setSecretScoreTurnId(syncTurnId);"), "Opening secret scores records the current synced turn.");
   assert(
-    appSource.includes('page !== "secretScores" || !secretScoreTurnId || secretScoreTurnId === syncTurnId'),
+    appSource.includes('page !== "secretScores"') && appSource.includes("secretScoresDisabled"),
     "Secret scores close when the synced turn advances.",
   );
   assert(
@@ -243,6 +256,12 @@ async function setGame(page, game) {
     localStorage.setItem("qwixx.activeGame.v1", JSON.stringify(nextGame));
   }, game);
   await page.reload();
+}
+
+async function enterSecretSequence(page, sequence) {
+  for (const press of sequence) {
+    await page.locator(`[data-secret-die="${press}"]`).click();
+  }
 }
 
 async function runFlowChecks(page) {
@@ -481,14 +500,16 @@ async function runSyncHostChecks(page) {
   await secretBottomDie.click();
   await secretBottomDie.click();
   assert((await page.locator(".secret-score-page").count()) === 0, "Wrong secret sequence does not open the score page.");
-  for (const die of [secretTopDie, secretBottomDie, secretTopDie, secretTopDie, secretBottomDie, secretBottomDie]) {
-    await die.click();
-  }
+  await enterSecretSequence(page, openSecretScoresSequence);
   assert((await page.locator(".secret-score-page").count()) === 1, "Correct secret sequence opens the score page.");
   assert((await page.locator(".secret-score-entry", { hasText: "Alice" }).count()) === 1, "Secret score page shows the local player.");
   assert((await page.locator(".secret-score-entry .grand-total").last().textContent()) === "0", "Missing score snapshots render as zero.");
   await page.screenshot({ path: outputPath("sync-secret-scores-mobile.png"), fullPage: true });
   await page.getByRole("button", { name: "Back" }).click();
+  await enterSecretSequence(page, showSecretUseCountsSequence);
+  assert((await page.getByRole("dialog", { name: "Uses" }).count()) === 1, "Secret usage command opens the usage modal.");
+  assert((await page.locator(".secret-usage-row", { hasText: "Alice" }).getByText("1").count()) === 1, "Opening secret scores increments the local usage count.");
+  await page.getByRole("button", { name: "Close" }).click();
   await page.locator("button.score-tile.legal").first().click();
   assert(!(await page.getByRole("button", { name: "Ready" }).isDisabled()), "Sync Ready enables after a valid mark.");
   await page.getByRole("button", { name: "Ready" }).click();
@@ -515,19 +536,18 @@ async function runSyncHostChecks(page) {
     await page.getByRole("button", { name: "Ready" }).click();
   }
   assert(await page.getByRole("button", { name: "Ready" }).isDisabled(), "Sync game over disables Ready.");
-  for (const die of [
-    page.locator('[data-secret-die="top"]'),
-    page.locator('[data-secret-die="bottom"]'),
-    page.locator('[data-secret-die="top"]'),
-    page.locator('[data-secret-die="top"]'),
-    page.locator('[data-secret-die="bottom"]'),
-    page.locator('[data-secret-die="bottom"]'),
-  ]) {
-    await die.click();
-  }
+  await enterSecretSequence(page, openSecretScoresSequence);
   assert((await page.locator(".secret-score-page").count()) === 1, "Secret score page opens during sync game over.");
   assert((await page.locator(".secret-score-entry .penalty-box.selected").count()) === 4, "Secret score page shows game-over penalties.");
   await page.getByRole("button", { name: "Back" }).click();
+  await enterSecretSequence(page, disableSecretScoresSequence);
+  assert((await page.locator(".sync-toast", { hasText: "Secret scores disabled" }).count()) === 1, "Disable command shows a local toast.");
+  await enterSecretSequence(page, openSecretScoresSequence);
+  assert((await page.locator(".secret-score-page").count()) === 0, "Disable command prevents opening secret scores afterward.");
+  await enterSecretSequence(page, showSecretUseCountsSequence);
+  assert((await page.getByRole("dialog", { name: "Uses" }).count()) === 1, "Usage command still works after secret scores are disabled.");
+  assert((await page.locator(".secret-usage-row", { hasText: "Alice" }).getByText("1").count()) === 1, "Usage modal keeps the fresh-game score-page count after disable.");
+  await page.getByRole("button", { name: "Close" }).click();
   await page.getByRole("button", { name: "Exit" }).click();
   assert((await page.getByRole("dialog", { name: "Exit?" }).count()) === 1, "Sync host Exit asks for confirmation.");
   await page.getByRole("button", { name: "Cancel" }).click();

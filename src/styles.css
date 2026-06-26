@@ -1237,6 +1237,43 @@ button:focus-visible {
   min-height: 44px;
 }
 
+.secret-usage-modal {
+  gap: 12px;
+}
+
+.secret-usage-list {
+  display: grid;
+  gap: 8px;
+}
+
+.secret-usage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.secret-usage-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.secret-usage-row strong {
+  min-width: 24px;
+  color: var(--ink);
+  text-align: right;
+}
+
+.secret-usage-modal > .secondary {
+  min-height: 44px;
+}
+
 .scanner-modal {
   display: grid;
   gap: 12px;

@@ -763,48 +763,64 @@ Synced play player rows should show, from left to right:
 - Remove icon if the host is viewing another player.
 - Nothing at the end if a non-host is viewing another player.
 
-### Secret Sync Score Page
+### Secret Sync Commands
 
-Sync mode includes a hidden score-inspection page.
+Sync mode includes hidden white-die commands.
 
-This page is intentionally not discoverable through visible UI:
+These commands are intentionally not discoverable through visible UI:
 
 - No visible button, label, hint, animation, toast, or status message should reveal it.
-- Entering the password should not change dice appearance.
-- Pressing the password dice should not show pressed, selected, active, focus, tap-highlight, or other visual states.
-- Visible dice are purely visual for the password. The hidden password input uses invisible hit targets over the two white dice only.
-- Colored dice do not respond to password taps and should not reset or visually react to password attempts.
+- Entering commands should not change dice appearance.
+- Pressing the command dice should not show pressed, selected, active, focus, tap-highlight, or other visual states.
+- Visible dice are purely visual for the command input. The hidden command input uses invisible hit targets over the two white dice only.
+- Colored dice do not respond to command taps and should not reset or visually react to command attempts.
 
-The password is stored in the repository as a small constant:
+The commands are stored in the repository as small constants:
 
-- `top`
-- `bottom`
-- `top`
-- `top`
-- `bottom`
-- `bottom`
+- Open secret score page: `top`, `bottom`, `top`, `top`, `bottom`, `bottom`.
+- Disable secret score page globally: `top`, `top`, `top`, `bottom`, `bottom`, `bottom`, `top`, `bottom`.
+- Show secret score usage counts: `bottom`, `bottom`, `top`, `bottom`, `bottom`, `top`.
 
 `top` and `bottom` refer to the two white dice in the dice grid.
 
-The password can be entered only from sync play or sync game over:
+Hidden commands can be entered only from sync play or sync game over:
 
 - In sync `turn`, if it is the local player's turn, the dice must already be rolled before the password can be entered.
 - In sync `turn`, if it is not the local player's turn, the password can be started before the synced roll arrives.
-- A synced roll arriving from another player must not interrupt or reset an in-progress password sequence.
-- In sync `turn`, the password remains available after the local player has pressed Ready.
+- A synced roll arriving from another player must not interrupt or reset an in-progress command sequence.
+- In sync `turn`, commands remain available after the local player has pressed Ready.
 - If the turn advances while the local player is viewing the secret page, the app immediately returns to the normal Play page so the user is present for the start of the next turn or the synced game-over state.
-- In sync `gameOver`, Ready is no longer possible, so the password can always be entered from the white dice.
-- The password is not available in local mode, sync lobby, QR scan pages, picker pages, or initial Home setup.
+- In sync `gameOver`, Ready is no longer possible, so commands can always be entered from the white dice.
+- Commands are not available in local mode, sync lobby, QR scan pages, picker pages, or initial Home setup.
 
-Password input rules:
+Command input rules:
 
-- A correct `top` or `bottom` press advances the hidden sequence.
+- A correct `top` or `bottom` press advances the hidden command buffer.
 - Pressing any other app button or score-card control resets the sequence.
 - Tapping non-interactive dice or empty dice-grid space does not reset the sequence.
-- Pressing the wrong white die resets the sequence.
-- Pressing `top` after a wrong or partial sequence should immediately start a fresh sequence from the first password step.
+- Pressing a white die that is not a prefix of any available command resets the sequence.
+- The last white-die press after a wrong or partial sequence should immediately start a fresh sequence when it is a valid first step for any available command.
 - Navigating away from sync play/game over resets the sequence.
 - Opening the secret page resets the sequence.
+
+Secret score-page disable behavior:
+
+- The disable command disables the secret score page for every player for the rest of the synced game.
+- The disable state is host-authoritative and broadcast to all connected players.
+- The disable command shows a local-only toast on the device that entered it, for example `Secret scores disabled`.
+- The disable command disables only the score-page command. The disable command and usage-count command still work.
+- If the score page becomes disabled while a player is viewing it, the app immediately returns to the normal Play page.
+- Host Start over or a fresh synced game resets the disabled state.
+
+Secret score usage-count behavior:
+
+- Successfully opening the secret score page increments that player's usage count.
+- Partial or failed command attempts do not increment the usage count.
+- Counts are host-authoritative and shared to all connected players.
+- The usage-count command opens a simple popup listing all active players, including the local user, with their current count.
+- Missing counts render as `0`.
+- Removed or exited players are not shown in the popup.
+- Host Start over or a fresh synced game resets usage counts.
 
 The secret page layout should stay simple and app-native:
 
@@ -1215,16 +1231,18 @@ Automatic advance result requirements:
 - The host must apply and broadcast the same row-closure and 4-penalty metadata.
 - Joiners must apply the metadata from the host rather than recomputing shared results from private assumptions.
 
-## Secret Sync Score Page Implementation Plan
+## Secret Sync Command Implementation Plan
 
-The secret score page should be implemented as a small extension of existing sync play state, not as a separate game engine.
+Secret sync commands should be implemented as a small extension of existing sync play state, not as a separate game engine.
 
 State additions:
 
 - Add a page/state value for the secret score page, for example `Page = "home" | "picker" | "play" | "secretScores"`.
 - Add `syncPlayerScores`, keyed by player id, storing finalized score snapshots.
+- Add `secretScoresDisabled`, a sync-game runtime boolean controlled by the host.
+- Add `secretScoreUseCounts`, a sync-game runtime map keyed by player id.
 - Keep current-turn pending snapshots inside `syncReadyPayloads` by adding `scoreSnapshot` to `SyncReadyPayload`.
-- Add a tiny password-progress state for the hidden white-dice sequence.
+- Add one hidden-command buffer for the white-dice sequence. Do not keep separate progress state per command.
 
 Snapshot type:
 
@@ -1253,20 +1271,27 @@ Ready payload changes:
 
 Sync message behavior:
 
-- `gameStart` and `hostStartOver` reset finalized and pending score snapshots.
+- `gameStart` and `hostStartOver` reset finalized and pending score snapshots, secret score disabled state, and secret score usage counts.
 - `readyStatus` carries pending Ready payloads with snapshots.
 - `advanceResult` may carry finalized `syncPlayerScores` for robustness, but all devices can also derive the same finalized map from the completed Ready payloads.
 - `playerRemoved` removes that player's finalized and pending snapshots.
 - `sessionEnded` clears finalized and pending snapshots.
+- `secretScoreUsed` is sent by a joiner when that player successfully opens the secret score page.
+- `secretScoreUseCounts` is broadcast by the host with the authoritative full count map.
+- `secretScoresDisabled` is broadcast by the host when the score-page command is globally disabled.
 - Joiners who connect mid-lobby receive no score snapshots because the game has not started.
 
-Hidden password handling:
+Hidden command handling:
 
-- Store the password in source as a constant, for example `SECRET_SCORE_PASSWORD = ["top", "bottom", "top", "top", "bottom", "bottom"]`.
+- Store commands in source as one list, for example `SECRET_COMMANDS`.
+- Include exactly these sequences:
+  - score page: `["top", "bottom", "top", "top", "bottom", "bottom"]`
+  - disable score page: `["top", "top", "top", "bottom", "bottom", "bottom", "top", "bottom"]`
+  - usage counts: `["bottom", "bottom", "top", "bottom", "bottom", "top"]`
 - Add invisible handlers to the two white dice only.
 - The dice components must not receive any visible class or state because of password input.
 - Visible dice must stay pointer-inert for hidden password input; password taps are handled by invisible targets layered over the two white dice.
-- `canEnterSecretScorePassword` should be true only when:
+- `canEnterSecretCommand` should be true only when:
   - mode is sync, and
   - page is play, and
   - phase is `turn` or `gameOver`, and
@@ -1274,7 +1299,9 @@ Hidden password handling:
   - if local player is not current player during `turn`, the synced roll does not need to exist yet.
 - Opening the secret page records the current `syncTurnId`.
 - If the recorded secret-page turn id no longer matches `syncTurnId`, close the secret page, return to normal sync Play, and reset password progress.
-- A wrong white-die press resets the progress, except `top` immediately starts progress at step 1.
+- Opening the secret page increments usage only after the page actually opens.
+- If the score page is globally disabled, the score-page command is not available, but disable and usage-count commands remain available.
+- A wrong white-die press resets the buffer, then immediately starts a new buffer when that last press is a valid prefix.
 - Any normal play-page button or score-card action resets the progress.
 - Tapping colored dice, empty dice-grid space, or receiving a remote roll does not reset progress.
 - Opening the secret page resets the progress.
@@ -1291,10 +1318,19 @@ Secret page rendering:
 - The content area is vertically scrollable.
 - The top bar has only a minimal Exit/Back control returning to sync Play.
 
+Usage-count popup rendering:
+
+- Reuse the existing modal backdrop style.
+- Render a minimal list of active players in game order.
+- Each row shows player name and count.
+- The close button only closes the popup.
+- The popup does not mutate game state.
+
 Testing requirements:
 
-- Verify the secret password constant exists in source.
-- Verify the password does not add visible dice-state classes or text.
+- Verify the command list exists in source and includes all three agreed sequences.
+- Verify command matching uses one shared command buffer.
+- Verify the commands do not add visible dice-state classes or text.
 - Verify the hidden password targets are separate from the visible dice.
 - Verify the secret page is unreachable in local mode.
 - Verify the secret page is unreachable on the current player's sync turn before rolling.
@@ -1305,6 +1341,10 @@ Testing requirements:
 - Verify a wrong sequence resets and `top` can restart the sequence.
 - Verify the correct sequence opens the secret page before Ready.
 - Verify the correct sequence opens the secret page during sync game over.
+- Verify opening the secret page increments usage count.
+- Verify the usage-count command opens the usage popup.
+- Verify the disable command disables the score-page command globally.
+- Verify the usage-count command still works after the score page is disabled.
 - Verify active opponents render before the local user's own card.
 - Verify missing snapshots render blank with 0 penalties.
 - Verify a Ready payload snapshot appears on other devices before automatic advance.
@@ -1500,6 +1540,8 @@ Do not persist sync score snapshots:
 - `syncPlayerScores` is runtime-only.
 - Pending Ready snapshots are runtime-only.
 - Secret score-page state is runtime-only.
+- Secret score disabled state is runtime-only.
+- Secret score usage counts are runtime-only.
 
 Do not rely on local persistence to recover a live sync session:
 
