@@ -771,7 +771,9 @@ This page is intentionally not discoverable through visible UI:
 
 - No visible button, label, hint, animation, toast, or status message should reveal it.
 - Entering the password should not change dice appearance.
-- Pressing the password dice should not show pressed, selected, or active visual states beyond normal button behavior already present elsewhere.
+- Pressing the password dice should not show pressed, selected, active, focus, tap-highlight, or other visual states.
+- Visible dice are purely visual for the password. The hidden password input uses invisible hit targets over the two white dice only.
+- Colored dice do not respond to password taps and should not reset or visually react to password attempts.
 
 The password is stored in the repository as a small constant:
 
@@ -788,7 +790,8 @@ The password can be entered only from sync play or sync game over:
 
 - In sync `turn`, the local player must not have pressed Ready.
 - In sync `turn`, if it is the local player's turn, the dice must already be rolled before the password can be entered.
-- In sync `turn`, if it is not the local player's turn, the password can be entered after the synced roll arrives.
+- In sync `turn`, if it is not the local player's turn, the password can be started before the synced roll arrives.
+- A synced roll arriving from another player must not interrupt or reset an in-progress password sequence.
 - In sync `gameOver`, Ready is no longer possible, so the password can always be entered from the white dice.
 - The password is not available in local mode, sync lobby, QR scan pages, picker pages, or initial Home setup.
 
@@ -796,6 +799,7 @@ Password input rules:
 
 - A correct `top` or `bottom` press advances the hidden sequence.
 - Pressing any other app button or score-card control resets the sequence.
+- Tapping non-interactive dice or empty dice-grid space does not reset the sequence.
 - Pressing the wrong white die resets the sequence.
 - Pressing `top` after a wrong or partial sequence should immediately start a fresh sequence from the first password step.
 - Navigating away from sync play/game over resets the sequence.
@@ -1259,15 +1263,17 @@ Hidden password handling:
 - Store the password in source as a constant, for example `SECRET_SCORE_PASSWORD = ["top", "bottom", "top", "top", "bottom", "bottom"]`.
 - Add invisible handlers to the two white dice only.
 - The dice components must not receive any visible class or state because of password input.
+- Visible dice must stay pointer-inert for hidden password input; password taps are handled by invisible targets layered over the two white dice.
 - `canEnterSecretScorePassword` should be true only when:
   - mode is sync, and
   - page is play, and
   - phase is `turn` or `gameOver`, and
   - local player has not pressed Ready when phase is `turn`, and
-  - the synced roll exists when phase is `turn`, and
   - if local player is current player during `turn`, the roll has already happened.
+  - if local player is not current player during `turn`, the synced roll does not need to exist yet.
 - A wrong white-die press resets the progress, except `top` immediately starts progress at step 1.
 - Any normal play-page button or score-card action resets the progress.
+- Tapping colored dice, empty dice-grid space, or receiving a remote roll does not reset progress.
 - Opening the secret page resets the progress.
 - Exiting the secret page returns to the normal sync Play page and resets the progress.
 
@@ -1286,8 +1292,11 @@ Testing requirements:
 
 - Verify the secret password constant exists in source.
 - Verify the password does not add visible dice-state classes or text.
+- Verify the hidden password targets are separate from the visible dice.
 - Verify the secret page is unreachable in local mode.
-- Verify the secret page is unreachable in sync turn before a roll.
+- Verify the secret page is unreachable on the current player's sync turn before rolling.
+- Verify the password can be started on a non-current player's sync turn before the synced roll arrives.
+- Verify the synced roll arriving does not reset an in-progress password sequence.
 - Verify a wrong sequence resets and `top` can restart the sequence.
 - Verify the correct sequence opens the secret page before Ready.
 - Verify the correct sequence opens the secret page during sync game over.

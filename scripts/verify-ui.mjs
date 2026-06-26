@@ -166,6 +166,13 @@ async function runSourceChecks() {
   assert(appSource.includes("scoreSnapshot"), "Ready payloads carry player score snapshots.");
   assert(appSource.includes("promoteReadySnapshots"), "Automatic sync advance promotes Ready snapshots.");
   assert(appSource.includes("data-secret-die"), "White dice carry hidden secret input hooks.");
+  assert(appSource.includes('className="secret-die-target"'), "Secret input uses invisible targets over the white dice.");
+  assert(!appSource.includes("data-secret-die={secretPress ?? undefined}"), "Visible dice do not carry secret input hooks.");
+  assert(/\.die\s*\{[^}]*pointer-events:\s*none;/s.test(styleSource), "Visible dice stay pointer-inert during hidden password input.");
+  assert(
+    appSource.includes("!isLocalReady && (!isUserTurn || Boolean(turn.roll))"),
+    "Opponent-turn secret input is available before the synced roll arrives.",
+  );
   assert(
     appSource.includes('className={value ? `die ${color} rolled` : `die ${color} idle`}'),
     "Secret input does not add visible dice-state classes.",
@@ -454,7 +461,7 @@ async function runSyncHostChecks(page) {
   assert((await page.getByRole("button", { name: "Show legal options" }).count()) === 1, "Unlock leaves personal hints off and usable.");
   assert((await page.getByRole("button", { name: "Opponent reached four penalties" }).count()) === 0, "Sync play hides opponent 4x control.");
   assert(await page.getByRole("button", { name: "Ready" }).isDisabled(), "Sync Ready starts disabled before rolling.");
-  assert((await page.locator("[data-secret-die]").count()) === 0, "Secret score input is unavailable before a synced roll.");
+  assert((await page.locator("[data-secret-die]").count()) === 0, "Current player's secret score input is unavailable before rolling.");
 
   await page.getByRole("button", { name: "Roll dice" }).click();
   assert(await page.getByRole("button", { name: "Ready" }).isDisabled(), "Sync Ready stays disabled until a mark or penalty.");

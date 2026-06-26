@@ -1447,7 +1447,7 @@ function App() {
   const canEnterSecretScorePassword =
     isSyncMode &&
     page === "play" &&
-    (syncPhase === "gameOver" || (syncPhase === "turn" && !isLocalReady && Boolean(turn.roll)));
+    (syncPhase === "gameOver" || (syncPhase === "turn" && !isLocalReady && (!isUserTurn || Boolean(turn.roll))));
 
   function syncLatestState(updates: Partial<LatestSyncState>) {
     latestRef.current = { ...latestRef.current, ...updates };
@@ -1653,7 +1653,13 @@ function App() {
       return;
     }
 
-    resetSecretProgress();
+    if (target instanceof Element && target.closest(".dice-grid")) {
+      return;
+    }
+
+    if (target instanceof Element && target.closest("button, input, select, textarea, [role='button']")) {
+      resetSecretProgress();
+    }
   }
 
   function closeSecretScores() {
@@ -4034,7 +4040,7 @@ function DiceGrid({
         }
       }}
       role="button"
-      tabIndex={0}
+      tabIndex={enabled ? 0 : -1}
       aria-disabled={!enabled && !secretEnabled}
       aria-label="Roll dice"
     >
@@ -4044,22 +4050,41 @@ function DiceGrid({
         }
 
         const value = roll ? roll[die.key as keyof DiceRoll] ?? null : null;
-        const secretPress: SecretDiePress | null =
-          secretEnabled && die.key === "whiteA" ? "top" : secretEnabled && die.key === "whiteB" ? "bottom" : null;
-
         return (
           <Die
             color={die.color}
             column={die.column}
             key={die.key}
-            onSecretPress={onSecretPress}
             row={die.row}
-            secretPress={secretPress}
             value={typeof value === "number" ? value : null}
             rollAnimationKey={rollAnimationKey}
           />
         );
       })}
+      {secretEnabled ? (
+        <>
+          <span
+            className="secret-die-target"
+            data-secret-die="top"
+            style={{ gridColumn: 1, gridRow: 1 }}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSecretPress?.("top");
+            }}
+            aria-hidden="true"
+          />
+          <span
+            className="secret-die-target"
+            data-secret-die="bottom"
+            style={{ gridColumn: 1, gridRow: 2 }}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSecretPress?.("bottom");
+            }}
+            aria-hidden="true"
+          />
+        </>
+      ) : null}
     </div>
   );
 }
@@ -4067,18 +4092,14 @@ function DiceGrid({
 function Die({
   color,
   column,
-  onSecretPress,
   row,
   rollAnimationKey,
-  secretPress,
   value,
 }: {
   color: string;
   column: number;
-  onSecretPress?: (press: SecretDiePress) => void;
   row: number;
   rollAnimationKey: number;
-  secretPress: SecretDiePress | null;
   value: number | null;
 }) {
   const pipPositions: Record<number, number[]> = {
@@ -4096,15 +4117,6 @@ function Die({
       className={value ? `die ${color} rolled` : `die ${color} idle`}
       style={{ gridColumn: column, gridRow: row }}
       key={`${color}-${rollAnimationKey}-${value ?? "idle"}`}
-      data-secret-die={secretPress ?? undefined}
-      onClick={(event) => {
-        if (!secretPress) {
-          return;
-        }
-
-        event.stopPropagation();
-        onSecretPress?.(secretPress);
-      }}
     >
       {Array.from({ length: 9 }, (_, index) => (
         <span className={positions.includes(index) ? `pip p${index} visible` : `pip p${index}`} key={index} />
