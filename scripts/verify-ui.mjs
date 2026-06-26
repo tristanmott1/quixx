@@ -151,6 +151,15 @@ async function runSourceChecks() {
   assert(styleSource.includes(".sync-player-status.reconnecting"), "Sync player rows have a reconnecting status style.");
   assert(transportSource.includes("parseQrPayload"), "QR payload parsing has its own parser.");
   assert(transportSource.includes("parseWireMessage"), "Data-channel message parsing has its own parser.");
+  assert(appSource.includes("function extractCompactSyncCode"), "Scanner paste input extracts compact sync codes.");
+  assert(appSource.includes("parseSyncOffer") && appSource.includes("parseSyncAnswer"), "Pasted compact sync codes are validated by the transport parsers.");
+  assert(appSource.includes("navigator.clipboard.writeText"), "QR panels can copy raw sync codes.");
+  assert(appSource.includes("CopyCodeModal"), "Clipboard failure falls back to a selectable code modal.");
+  assert(appSource.includes('copyLabel="Copy host code"'), "Host QR exposes a copy-code button.");
+  assert(appSource.includes('copyLabel="Copy answer code"'), "Answer QR exposes a copy-code button.");
+  assert(appSource.includes('expectedKind={syncCameraMode === "answer" ? "answer" : "offer"}'), "Scanner paste input validates the expected code type.");
+  assert(styleSource.includes(".scanner-paste"), "Scanner modal styles the paste-code input.");
+  assert(styleSource.includes(".copy-code-modal textarea"), "Copy fallback modal styles the selectable code textarea.");
   assert(!appSource.includes("sync-play-strip"), "Sync play has no duplicate Ready-count strip.");
   assert(!styleSource.includes(".sync-play-strip"), "Duplicate Ready-count strip styles are removed.");
   assert(!appSource.includes("hintsChanged"), "Personal sync hint changes are not broadcast.");
@@ -479,6 +488,37 @@ async function runSyncHostChecks(page) {
   assert((await page.getByText("Alice").count()) > 0, "Host appears in sync lobby.");
   assert((await page.locator(".score-card-choice-heading", { hasText: "Card #1" }).count()) === 1, "Sync host lobby shows the host score card.");
   assert((await page.locator(".qr-panel .qr-code").count()) === 1, "Host QR is generated.");
+  assert((await page.getByRole("button", { name: "Copy host code" }).count()) === 1, "Host QR has a copy-code button.");
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async () => {
+          throw new Error("Clipboard blocked.");
+        },
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Copy host code" }).click();
+  assert((await page.getByRole("dialog", { name: "Host code" }).count()) === 1, "Clipboard failure shows a selectable host-code fallback.");
+  await page.screenshot({ path: outputPath("sync-host-code-copy-fallback-mobile.png"), fullPage: true });
+  await page.getByRole("dialog", { name: "Host code" }).getByRole("button", { name: "Close" }).click();
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text) => {
+          window.__copiedSyncCode = text;
+        },
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Copy host code" }).click();
+  const copiedHostCode = await page.evaluate(() => window.__copiedSyncCode ?? "");
+  assert(copiedHostCode.startsWith("QWO:"), "Copy host code writes the raw compact offer.");
+  assert((await page.locator(".sync-toast", { hasText: "Copied" }).count()) === 1, "Copy host code shows a small confirmation toast.");
+  await page.screenshot({ path: outputPath("sync-host-code-copied-mobile.png"), fullPage: true });
+  await page.locator(".sync-toast").waitFor({ state: "hidden", timeout: 6000 });
   assert(
     JSON.stringify(await page.locator(".sync-control-row button").allTextContents()) === JSON.stringify(["Randomize", "Scan"]),
     "Host lobby controls show Randomize before Scan.",
@@ -492,6 +532,14 @@ async function runSyncHostChecks(page) {
     }),
     "Host Start button appears below the host QR.",
   );
+  await page.getByRole("button", { name: "Scan" }).click();
+  assert((await page.getByLabel("Paste an answer code").count()) === 1, "Answer scanner includes a paste-code input.");
+  await page.screenshot({ path: outputPath("sync-answer-code-paste-mobile.png"), fullPage: true });
+  await page.getByLabel("Paste an answer code").fill("QWO:BAD");
+  await page.getByRole("button", { name: "Use pasted answer code" }).click();
+  assert((await page.getByText("Paste an answer code").count()) === 1, "Wrong pasted code type is rejected before handshake.");
+  await page.screenshot({ path: outputPath("sync-answer-code-paste-error-mobile.png"), fullPage: true });
+  await page.getByRole("button", { name: "Cancel" }).click();
   await page.getByRole("button", { name: "Start" }).click();
   assert((await page.locator(".sum-strip").count()) === 0, "Sync play does not show manual white-sum boxes.");
   assert((await page.locator(".sync-play-strip").count()) === 0, "Sync play does not show a duplicate Ready-count strip.");
