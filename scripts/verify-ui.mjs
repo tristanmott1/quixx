@@ -131,6 +131,19 @@ async function runSourceChecks() {
   assert(!appSource.includes("advanceEnabled"), "Sync has no user-facing Advance button state.");
   assert(!appSource.includes('"scanOffer"'), "Sync has no stored scanOffer phase.");
   assert(!appSource.includes('"ended"'), "Sync ended state is represented by idle plus a message.");
+  assert(transportSource.includes('export type SyncConnectionStatus = "connected" | "reconnecting" | "gone";'), "Sync transport exposes connection status.");
+  assert(transportSource.includes("DEFAULT_RECONNECT_GRACE_MS = 60000"), "Sync reconnect grace defaults to 60 seconds.");
+  assert(transportSource.includes('state === "disconnected"') && transportSource.includes("markPeerReconnecting"), "WebRTC disconnected enters reconnecting state.");
+  assert(transportSource.includes('state === "failed" || state === "closed"') && transportSource.includes("markPeerGone"), "Only terminal WebRTC states mark a peer gone.");
+  assert(appSource.includes("HEARTBEAT_INTERVAL_MS = 5000"), "Sync heartbeat interval is five seconds.");
+  assert(appSource.includes("HEARTBEAT_STALE_MS = 15000"), "Sync heartbeat stale threshold is fifteen seconds.");
+  assert(appSource.includes('type: "heartbeat"'), "Sync play sends heartbeat messages.");
+  assert(appSource.includes('type: "connectionStatus"'), "Host broadcasts reconnecting/connected status changes.");
+  assert(appSource.includes("syncConnectionStatuses"), "Sync app tracks peer connection statuses.");
+  assert(appSource.includes("syncHostConnectionStatus"), "Joiners track host connection status.");
+  assert(appSource.includes("reconnectingUnreadyPlayers"), "Automatic sync advance is explicitly gated by unready reconnecting players.");
+  assert(appSource.includes("wakeLock") && appSource.includes("visibilitychange"), "Sync play requests and restores screen Wake Lock when supported.");
+  assert(styleSource.includes(".sync-player-status.reconnecting"), "Sync player rows have a reconnecting status style.");
   assert(transportSource.includes("parseQrPayload"), "QR payload parsing has its own parser.");
   assert(transportSource.includes("parseWireMessage"), "Data-channel message parsing has its own parser.");
   assert(!appSource.includes("sync-play-strip"), "Sync play has no duplicate Ready-count strip.");
@@ -566,9 +579,11 @@ async function runSyncTransportChecks(browser) {
   await hostPage.evaluate(async () => {
     const { SyncHostTransport } = await import("/src/syncTransport.ts");
     window.__messages = [];
+    window.__hostStatuses = [];
     window.__host = new SyncHostTransport({
       callbacks: {
         onMessage: (_playerId, message) => window.__messages.push(message),
+        onPeerStatus: (playerId, status) => window.__hostStatuses.push({ playerId, status }),
       },
       hostName: "Alice",
       hostPlayerId: "alice",
@@ -593,6 +608,11 @@ async function runSyncTransportChecks(browser) {
     assert(compactQrPattern.test(answer), "Join answer uses QR alphanumeric characters.");
 
     await hostPage.evaluate((answerText) => window.__host.acceptAnswer(answerText), answer);
+    await hostPage.waitForFunction(
+      (playerId) => window.__hostStatuses?.some((entry) => entry.playerId === playerId && entry.status === "connected"),
+      player.id,
+      { timeout: 5000 },
+    );
     await hostPage.waitForFunction(
       (playerId) => window.__messages?.some((message) => message.type === "join" && message.playerId === playerId),
       player.id,
@@ -648,6 +668,13 @@ async function runSyncTransportChecks(browser) {
 
   await joinPage.evaluate(() => window.__join.send({ type: "ready", payload: { turnId: "t1", playerId: "bob" } }));
   await hostPage.waitForFunction(() => window.__messages?.some((message) => message.type === "ready"), null, { timeout: 5000 });
+
+  await hostPage.evaluate(() => window.__host.broadcast({ type: "heartbeat" }));
+  await joinPage.waitForFunction(
+    () => window.__joinMessages?.some((message) => message.type === "heartbeat"),
+    null,
+    { timeout: 5000 },
+  );
 
   await hostPage.evaluate(() => window.__host.broadcast({ type: "sessionEnded" }));
   await joinPage.waitForFunction(

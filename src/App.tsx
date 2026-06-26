@@ -60,7 +60,7 @@ import {
   type ScoreCardPreset,
   type ScoreCardType,
 } from "./scoreCards";
-import { SyncHostTransport, SyncJoinTransport, type SyncWireMessage } from "./syncTransport";
+import { SyncHostTransport, SyncJoinTransport, type SyncConnectionStatus, type SyncWireMessage } from "./syncTransport";
 
 type Page = "home" | "picker" | "play" | "secretScores";
 type HomeTab = "local" | "sync";
@@ -150,6 +150,8 @@ type SecretCommand = {
 
 type SecretScoreUseCounts = Record<string, number>;
 
+type SyncConnectionStatuses = Record<string, SyncConnectionStatus>;
+
 type BarcodeDetectorResult = {
   rawValue: string;
 };
@@ -168,6 +170,17 @@ type ExtendedMediaTrackCapabilities = MediaTrackCapabilities & {
 type ExtendedMediaTrackConstraintSet = MediaTrackConstraintSet & {
   focusMode?: string;
   torch?: boolean;
+};
+
+type ScreenWakeLockSentinel = {
+  released: boolean;
+  release: () => Promise<void>;
+};
+
+type ScreenWakeLockNavigator = Navigator & {
+  wakeLock?: {
+    request: (type: "screen") => Promise<ScreenWakeLockSentinel>;
+  };
 };
 
 type GameSnapshot = {
@@ -194,6 +207,8 @@ type LatestSyncState = {
   showHints: boolean;
   syncHintsLockedOff: boolean;
   syncPlayerScores: SyncPlayerScores;
+  syncConnectionStatuses: SyncConnectionStatuses;
+  syncHostConnectionStatus: SyncConnectionStatus;
   secretScoresDisabled: boolean;
   secretScoreUseCounts: SecretScoreUseCounts;
   gameScoreCardId: number;
@@ -216,6 +231,8 @@ type PlayStatePatch = {
   showHints?: boolean;
   syncHintsLockedOff?: boolean;
   syncPlayerScores?: SyncPlayerScores;
+  syncConnectionStatuses?: SyncConnectionStatuses;
+  syncHostConnectionStatus?: SyncConnectionStatus;
   secretScoresDisabled?: boolean;
   secretScoreUseCounts?: SecretScoreUseCounts;
   gameScoreCardId?: number;
@@ -250,6 +267,8 @@ const SUM_NUMBERS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] as const;
 const SCORE_VALUES = [0, 1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66, 78] as const;
 const MAX_PENALTIES = 4;
 const PENALTY_POINTS = 5;
+const HEARTBEAT_INTERVAL_MS = 5000;
+const HEARTBEAT_STALE_MS = 15000;
 const SECRET_COMMANDS: SecretCommand[] = [
   { id: "openScores", sequence: ["top", "bottom", "top", "top", "bottom", "bottom"] },
   { id: "disableScores", sequence: ["top", "top", "top", "bottom", "bottom", "bottom", "top", "bottom"] },
@@ -1326,6 +1345,10 @@ function normalizePlayerIds(value: unknown) {
   return Array.isArray(value) ? value.filter((playerId): playerId is string => typeof playerId === "string") : [];
 }
 
+function normalizeSyncConnectionStatus(value: unknown): SyncConnectionStatus | null {
+  return value === "connected" || value === "reconnecting" || value === "gone" ? value : null;
+}
+
 function playerName(players: Player[], playerId: string) {
   return players.find((player) => player.id === playerId)?.name ?? "A player";
 }
@@ -1406,6 +1429,8 @@ function App() {
   const [syncPenaltyPlayerIds, setSyncPenaltyPlayerIds] = useState<string[]>([]);
   const [syncToastMessage, setSyncToastMessage] = useState("");
   const [syncPlayerScores, setSyncPlayerScores] = useState<SyncPlayerScores>({});
+  const [syncConnectionStatuses, setSyncConnectionStatuses] = useState<SyncConnectionStatuses>({});
+  const [syncHostConnectionStatus, setSyncHostConnectionStatus] = useState<SyncConnectionStatus>("connected");
   const [secretScoresDisabled, setSecretScoresDisabled] = useState(false);
   const [secretScoreUseCounts, setSecretScoreUseCounts] = useState<SecretScoreUseCounts>({});
   const [secretUseCountsOpen, setSecretUseCountsOpen] = useState(false);
@@ -1430,6 +1455,9 @@ function App() {
   const hostTransportRef = useRef<SyncHostTransport | null>(null);
   const joinTransportRef = useRef<SyncJoinTransport | null>(null);
   const syncToastTimeoutRef = useRef(0);
+  const syncPeerHeartbeatAtRef = useRef<Record<string, number>>({});
+  const syncHostHeartbeatAtRef = useRef(Date.now());
+  const syncWakeLockRef = useRef<ScreenWakeLockSentinel | null>(null);
   const pickerTopRef = useRef<HTMLDivElement>(null);
   const latestRef = useRef<LatestSyncState>({
     rows,
@@ -1446,6 +1474,8 @@ function App() {
     showHints,
     syncHintsLockedOff,
     syncPlayerScores,
+    syncConnectionStatuses,
+    syncHostConnectionStatus,
     secretScoresDisabled,
     secretScoreUseCounts,
     gameScoreCardId,
@@ -1462,6 +1492,17 @@ function App() {
   const isUserTurn = Boolean(currentPlayer && currentPlayer.id === selectedPlayerId);
   const isSyncMode = mode === "sync";
   const isHost = isSyncMode && syncRole === "host";
+  const isSyncPlayActive = isSyncMode && page === "play" && (syncPhase === "turn" || syncPhase === "gameOver");
+  const hostReconnecting = isSyncMode && !isHost && syncHostConnectionStatus === "reconnecting";
+  const visibleConnectionStatuses = useMemo(() => {
+    const statuses = { ...syncConnectionStatuses };
+
+    if (!isHost && syncHostPlayerId && syncHostConnectionStatus !== "connected") {
+      statuses[syncHostPlayerId] = syncHostConnectionStatus;
+    }
+
+    return statuses;
+  }, [isHost, syncConnectionStatuses, syncHostConnectionStatus, syncHostPlayerId]);
   const localReadyPayload = selectedPlayerId
     ? syncReadyPayloads.find((payload) => payload.playerId === selectedPlayerId && payload.turnId === syncTurnId)
     : null;
@@ -1480,6 +1521,7 @@ function App() {
   const readyEnabled = isSyncMode
     ? !gameOver &&
       syncPhase === "turn" &&
+      !hostReconnecting &&
       !isLocalReady &&
       (isUserTurn ? canAdvanceTurn(scoreCard, turn, true, false) : Boolean(turn.roll))
     : false;
@@ -1557,6 +1599,14 @@ function App() {
 
     if ("syncPlayerScores" in patch && patch.syncPlayerScores) {
       latestUpdates.syncPlayerScores = patch.syncPlayerScores;
+    }
+
+    if ("syncConnectionStatuses" in patch && patch.syncConnectionStatuses) {
+      latestUpdates.syncConnectionStatuses = patch.syncConnectionStatuses;
+    }
+
+    if ("syncHostConnectionStatus" in patch && patch.syncHostConnectionStatus) {
+      latestUpdates.syncHostConnectionStatus = patch.syncHostConnectionStatus;
     }
 
     if ("secretScoresDisabled" in patch && typeof patch.secretScoresDisabled === "boolean") {
@@ -1639,6 +1689,14 @@ function App() {
       setSyncPlayerScores(patch.syncPlayerScores);
     }
 
+    if ("syncConnectionStatuses" in patch && patch.syncConnectionStatuses) {
+      setSyncConnectionStatuses(patch.syncConnectionStatuses);
+    }
+
+    if ("syncHostConnectionStatus" in patch && patch.syncHostConnectionStatus) {
+      setSyncHostConnectionStatus(patch.syncHostConnectionStatus);
+    }
+
     if ("secretScoresDisabled" in patch && typeof patch.secretScoresDisabled === "boolean") {
       setSecretScoresDisabled(patch.secretScoresDisabled);
     }
@@ -1697,6 +1755,56 @@ function App() {
   ) {
     setSyncPenaltyPlayerIds(penaltyPlayerIds);
     showSyncToast(formatSyncAdvanceToast(scoreCard, closedBy, penaltyPlayerIds, playersForNames));
+  }
+
+  function setPeerConnectionStatus(playerId: string, status: SyncConnectionStatus, broadcast = true) {
+    const latest = latestRef.current;
+
+    if (!playerId || !latest.gamePlayers.some((player) => player.id === playerId)) {
+      return;
+    }
+
+    if (status === "connected") {
+      syncPeerHeartbeatAtRef.current[playerId] = Date.now();
+    }
+
+    const previousStatus = latest.syncConnectionStatuses[playerId] ?? "connected";
+
+    if (previousStatus === status) {
+      return;
+    }
+
+    const nextStatuses = { ...latest.syncConnectionStatuses };
+
+    if (status === "reconnecting") {
+      nextStatuses[playerId] = "reconnecting";
+    } else {
+      delete nextStatuses[playerId];
+    }
+
+    applyPlayState({ syncConnectionStatuses: nextStatuses });
+
+    if (broadcast && latest.syncRole === "host") {
+      hostTransportRef.current?.broadcast({
+        type: "connectionStatus",
+        playerId,
+        status,
+      });
+    }
+  }
+
+  function setHostConnectionStatus(status: SyncConnectionStatus) {
+    const latest = latestRef.current;
+
+    if (status === "connected") {
+      syncHostHeartbeatAtRef.current = Date.now();
+    }
+
+    if (latest.syncHostConnectionStatus === status) {
+      return;
+    }
+
+    applyPlayState({ syncHostConnectionStatus: status });
   }
 
   function getAvailableSecretCommands() {
@@ -1944,6 +2052,8 @@ function App() {
       showHints,
       syncHintsLockedOff,
       syncPlayerScores,
+      syncConnectionStatuses,
+      syncHostConnectionStatus,
       secretScoresDisabled,
       secretScoreUseCounts,
       gameScoreCardId,
@@ -1964,6 +2074,8 @@ function App() {
     showHints,
     syncHintsLockedOff,
     syncPlayerScores,
+    syncConnectionStatuses,
+    syncHostConnectionStatus,
     secretScoresDisabled,
     secretScoreUseCounts,
     gameScoreCardId,
@@ -1975,6 +2087,103 @@ function App() {
     hostTransportRef.current?.close();
     joinTransportRef.current?.close();
   }, []);
+
+  useEffect(() => {
+    if (!isSyncPlayActive) {
+      return undefined;
+    }
+
+    function sendHeartbeat() {
+      const latest = latestRef.current;
+      const now = Date.now();
+
+      if (latest.syncRole === "host") {
+        hostTransportRef.current?.broadcast({ type: "heartbeat", at: now });
+
+        latest.gamePlayers.forEach((player) => {
+          if (player.id === latest.selectedPlayerId) {
+            return;
+          }
+
+          const lastHeartbeat = syncPeerHeartbeatAtRef.current[player.id] ?? now;
+
+          if (!syncPeerHeartbeatAtRef.current[player.id]) {
+            syncPeerHeartbeatAtRef.current[player.id] = now;
+          }
+
+          if (now - lastHeartbeat > HEARTBEAT_STALE_MS) {
+            setPeerConnectionStatus(player.id, "reconnecting");
+          }
+        });
+        return;
+      }
+
+      joinTransportRef.current?.send({
+        type: "heartbeat",
+        at: now,
+        playerId: latest.selectedPlayerId,
+      });
+
+      if (now - syncHostHeartbeatAtRef.current > HEARTBEAT_STALE_MS) {
+        setHostConnectionStatus("reconnecting");
+      }
+    }
+
+    sendHeartbeat();
+    const heartbeatInterval = window.setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(heartbeatInterval);
+    };
+  }, [isSyncPlayActive]);
+
+  useEffect(() => {
+    if (!isSyncPlayActive) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function requestWakeLock() {
+      if (document.visibilityState !== "visible" || syncWakeLockRef.current) {
+        return;
+      }
+
+      try {
+        const nextWakeLock = await (navigator as ScreenWakeLockNavigator).wakeLock?.request("screen");
+
+        if (!nextWakeLock) {
+          return;
+        }
+
+        if (cancelled) {
+          await nextWakeLock.release().catch(() => undefined);
+          return;
+        }
+
+        syncWakeLockRef.current = nextWakeLock;
+      } catch {
+        // Wake Lock is best effort; connection rules never depend on it.
+      }
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void requestWakeLock();
+      }
+    }
+
+    void requestWakeLock();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      const currentWakeLock = syncWakeLockRef.current;
+      syncWakeLockRef.current = null;
+      void currentWakeLock?.release().catch(() => undefined);
+    };
+  }, [isSyncPlayActive]);
 
   useEffect(() => {
     if (!draggingPlayerId) {
@@ -2067,11 +2276,15 @@ function App() {
     joinTransportRef.current?.close();
     localStorage.removeItem(ACTIVE_GAME_KEY);
     clearSyncAdvanceFeedback();
+    syncPeerHeartbeatAtRef.current = {};
+    syncHostHeartbeatAtRef.current = Date.now();
     syncLatestState({
       syncRole: null,
       syncHostPlayerId: null,
       syncHintsLockedOff: false,
       syncPlayerScores: {},
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
       secretScoresDisabled: false,
       secretScoreUseCounts: {},
       syncScoreCardId: null,
@@ -2099,6 +2312,8 @@ function App() {
       syncPhase: "idle",
       syncHintsLockedOff: false,
       syncPlayerScores: {},
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
       secretScoresDisabled: false,
       secretScoreUseCounts: {},
       syncScoreCardId: null,
@@ -2125,6 +2340,8 @@ function App() {
       undoStack: [],
       syncReadyPayloads: [],
       syncPlayerScores: {},
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
       secretScoresDisabled: false,
       secretScoreUseCounts: {},
       rollAnimationKey: 0,
@@ -2137,6 +2354,8 @@ function App() {
     joinTransportRef.current?.close();
     hostTransportRef.current = null;
     joinTransportRef.current = null;
+    syncPeerHeartbeatAtRef.current = {};
+    syncHostHeartbeatAtRef.current = Date.now();
     syncLatestState({
       syncRole: null,
       syncPhase: "idle",
@@ -2144,6 +2363,8 @@ function App() {
       syncReadyPayloads: [],
       syncHintsLockedOff: false,
       syncPlayerScores: {},
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
       secretScoresDisabled: false,
       secretScoreUseCounts: {},
       syncScoreCardId: null,
@@ -2154,6 +2375,8 @@ function App() {
     setSyncReadyPayloads([]);
     setSyncHintsLockedOff(false);
     setSyncPlayerScores({});
+    setSyncConnectionStatuses({});
+    setSyncHostConnectionStatus("connected");
     setSecretScoresDisabled(false);
     setSecretScoreUseCounts({});
     setSecretUseCountsOpen(false);
@@ -2180,6 +2403,7 @@ function App() {
       callbacks: {
         onMessage: handleHostMessage,
         onPeerClosed: handleHostPeerClosed,
+        onPeerStatus: handleHostPeerStatus,
       },
       hostName: hostPlayer.name,
       hostPlayerId: hostPlayer.id,
@@ -2196,6 +2420,8 @@ function App() {
     setSyncHostPlayerId(hostPlayer.id);
     setSyncTurnId(turnId);
     setSyncReadyPayloads([]);
+    syncPeerHeartbeatAtRef.current = {};
+    syncHostHeartbeatAtRef.current = Date.now();
     syncLatestState({
       syncRole: "host",
       syncPhase: "hostLobby",
@@ -2203,6 +2429,8 @@ function App() {
       syncTurnId: turnId,
       syncReadyPayloads: [],
       syncHintsLockedOff: false,
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
       secretScoresDisabled: false,
       secretScoreUseCounts: {},
       syncScoreCardId: scoreCardId,
@@ -2253,6 +2481,7 @@ function App() {
       const joinedPlayer = await hostTransport.acceptAnswer(value);
       const currentPlayers = latestRef.current.gamePlayers;
 
+      syncPeerHeartbeatAtRef.current[joinedPlayer.id] = Date.now();
       if (!currentPlayers.some((player) => player.id === joinedPlayer.id)) {
         const nextPlayers = [...currentPlayers, joinedPlayer];
 
@@ -2284,7 +2513,11 @@ function App() {
     const joinTransport = new SyncJoinTransport({
       onClosed: () => endSyncSession("Host disconnected"),
       onMessage: handleJoinerMessage,
-      onOpen: () => setSyncMessage("Connected"),
+      onOpen: () => {
+        setHostConnectionStatus("connected");
+        setSyncMessage("Connected");
+      },
+      onStatus: handleJoinerConnectionStatus,
     });
 
     setSyncCameraMode(null);
@@ -2304,16 +2537,20 @@ function App() {
       setSyncAnswerText(answer.answerText);
       setSyncTurnId(turnId);
       setSyncReadyPayloads([]);
+      syncPeerHeartbeatAtRef.current = {};
+      syncHostHeartbeatAtRef.current = Date.now();
       syncLatestState({
         syncRole: "joiner",
         syncPhase: "showAnswer",
         syncHostPlayerId: answer.hostPlayerId,
-        syncTurnId: turnId,
-        syncReadyPayloads: [],
-        syncHintsLockedOff: false,
-        secretScoresDisabled: false,
-        secretScoreUseCounts: {},
-      });
+      syncTurnId: turnId,
+      syncReadyPayloads: [],
+      syncHintsLockedOff: false,
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
+      secretScoresDisabled: false,
+      secretScoreUseCounts: {},
+    });
       resetPlayState(
         [
           { id: answer.hostPlayerId, name: answer.hostName },
@@ -2338,6 +2575,11 @@ function App() {
   }
 
   function handleHostMessage(playerId: string, message: SyncWireMessage) {
+    if (message.type === "heartbeat") {
+      setPeerConnectionStatus(playerId, "connected");
+      return;
+    }
+
     if (message.type === "join") {
       broadcastLobbyState();
       return;
@@ -2370,6 +2612,29 @@ function App() {
   }
 
   function handleJoinerMessage(_playerId: string, message: SyncWireMessage) {
+    if (message.type === "heartbeat") {
+      setHostConnectionStatus("connected");
+      return;
+    }
+
+    if (message.type === "connectionStatus") {
+      const playerId = typeof message.playerId === "string" ? message.playerId : "";
+      const status = normalizeSyncConnectionStatus(message.status);
+
+      if (playerId && status) {
+        const nextStatuses = { ...latestRef.current.syncConnectionStatuses };
+
+        if (status === "reconnecting") {
+          nextStatuses[playerId] = status;
+        } else {
+          delete nextStatuses[playerId];
+        }
+
+        applyPlayState({ syncConnectionStatuses: nextStatuses });
+      }
+      return;
+    }
+
     if (message.type === "lobbyState") {
       const nextPlayers = normalizePlayers(message.players);
       const hostId = typeof message.hostPlayerId === "string" ? message.hostPlayerId : latestRef.current.syncHostPlayerId;
@@ -2475,10 +2740,22 @@ function App() {
       const nextPlayers = normalizePlayers(message.players);
       const nextPlayerScores = removePlayerScore(latestRef.current.syncPlayerScores, playerId);
       const nextUseCounts = removePlayerUseCount(latestRef.current.secretScoreUseCounts, playerId);
+      const nextStatuses = { ...latestRef.current.syncConnectionStatuses };
+
+      delete nextStatuses[playerId];
       if (nextPlayers.length > 0) {
-        applyPlayState({ gamePlayers: nextPlayers, syncPlayerScores: nextPlayerScores, secretScoreUseCounts: nextUseCounts });
+        applyPlayState({
+          gamePlayers: nextPlayers,
+          syncPlayerScores: nextPlayerScores,
+          syncConnectionStatuses: nextStatuses,
+          secretScoreUseCounts: nextUseCounts,
+        });
       } else {
-        applyPlayState({ syncPlayerScores: nextPlayerScores, secretScoreUseCounts: nextUseCounts });
+        applyPlayState({
+          syncPlayerScores: nextPlayerScores,
+          syncConnectionStatuses: nextStatuses,
+          secretScoreUseCounts: nextUseCounts,
+        });
       }
 
       if (message.discardTurn === true) {
@@ -2517,6 +2794,31 @@ function App() {
     removeSyncPlayer(playerId);
   }
 
+  function handleHostPeerStatus(playerId: string, status: SyncConnectionStatus) {
+    if (latestRef.current.syncRole !== "host") {
+      return;
+    }
+
+    setPeerConnectionStatus(playerId, status, status !== "gone");
+  }
+
+  function handleJoinerConnectionStatus(status: SyncConnectionStatus) {
+    if (latestRef.current.syncRole !== "joiner") {
+      return;
+    }
+
+    setHostConnectionStatus(status);
+
+    if (status === "reconnecting") {
+      setSyncMessage("Reconnecting");
+      return;
+    }
+
+    if (status === "connected" && (latestRef.current.syncPhase === "turn" || latestRef.current.syncPhase === "gameOver")) {
+      setSyncMessage("");
+    }
+  }
+
   function startSyncedPlay(
     nextPlayers: Player[],
     turnId: string,
@@ -2527,6 +2829,8 @@ function App() {
     const nextTurn = createEmptyTurn();
     const nextShowHints = nextHintsLockedOff ? false : latestRef.current.showHints;
 
+    syncPeerHeartbeatAtRef.current = {};
+    syncHostHeartbeatAtRef.current = Date.now();
     clearSyncAdvanceFeedback();
     applyPlayState({
       rows: nextRows,
@@ -2541,6 +2845,8 @@ function App() {
       syncPhase: "turn",
       syncReadyPayloads: [],
       syncPlayerScores: {},
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
       secretScoresDisabled: false,
       secretScoreUseCounts: {},
       showHints: nextShowHints,
@@ -2562,6 +2868,8 @@ function App() {
     const nextRows = createEmptyRows();
     const nextTurn = createEmptyTurn();
 
+    syncPeerHeartbeatAtRef.current = {};
+    syncHostHeartbeatAtRef.current = Date.now();
     clearSyncAdvanceFeedback();
     applyPlayState({
       rows: nextRows,
@@ -2576,6 +2884,8 @@ function App() {
       syncPhase: nextPhase,
       syncReadyPayloads: [],
       syncPlayerScores: {},
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
       secretScoresDisabled: false,
       secretScoreUseCounts: {},
       syncHintsLockedOff: nextHintsLockedOff,
@@ -2640,7 +2950,7 @@ function App() {
   }
 
   function rollSyncDice() {
-    if (!isSyncMode || !isUserTurn || gameOver || turn.roll || syncPhase !== "turn") {
+    if (!isSyncMode || !isUserTurn || hostReconnecting || gameOver || turn.roll || syncPhase !== "turn") {
       return;
     }
 
@@ -2662,8 +2972,14 @@ function App() {
     const activePayloads = nextPayloads.filter((payload) =>
       payload.turnId === latest.syncTurnId && currentPlayers.some((player) => player.id === payload.playerId),
     );
+    const reconnectingUnreadyPlayers = currentPlayers.filter(
+      (player) =>
+        latest.syncConnectionStatuses[player.id] === "reconnecting" &&
+        !activePayloads.some((payload) => payload.playerId === player.id && payload.turnId === latest.syncTurnId),
+    );
     const allReady =
       currentPlayers.length > 0 &&
+      reconnectingUnreadyPlayers.length === 0 &&
       currentPlayers.every((player) =>
         activePayloads.some((payload) => payload.playerId === player.id && payload.turnId === latest.syncTurnId),
       );
@@ -2864,12 +3180,17 @@ function App() {
       ? latest.currentPlayerIndex % nextPlayers.length
       : Math.max(0, latest.currentPlayerIndex - (removedIndex < latest.currentPlayerIndex ? 1 : 0));
     const nextTurn = currentPlayerRemoved ? nextTurnId() : latest.syncTurnId;
+    const nextStatuses = { ...latest.syncConnectionStatuses };
+
+    delete nextStatuses[playerId];
+    delete syncPeerHeartbeatAtRef.current[playerId];
 
     hostTransportRef.current?.removePeer(playerId);
     applyPlayState({
       gamePlayers: nextPlayers,
       currentPlayerIndex: nextIndex,
       syncPlayerScores: removePlayerScore(latest.syncPlayerScores, playerId),
+      syncConnectionStatuses: nextStatuses,
       secretScoreUseCounts: removePlayerUseCount(latest.secretScoreUseCounts, playerId),
     });
 
@@ -2904,6 +3225,8 @@ function App() {
       syncReadyPayloads: [],
       syncPhase: "idle",
       syncPlayerScores: {},
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
       secretScoresDisabled: false,
       secretScoreUseCounts: {},
       gameOver: false,
@@ -3085,6 +3408,8 @@ function App() {
       undoStack: [],
       syncHintsLockedOff: false,
       syncPlayerScores: {},
+      syncConnectionStatuses: {},
+      syncHostConnectionStatus: "connected",
       secretScoresDisabled: false,
       secretScoreUseCounts: {},
       syncScoreCardId: null,
@@ -3678,7 +4003,7 @@ function App() {
               rollAnimationKey={rollAnimationKey}
               enabled={
                 mode === "sync"
-                  ? isUserTurn && !gameOver && !turn.roll && syncPhase === "turn"
+                  ? isUserTurn && !hostReconnecting && !gameOver && !turn.roll && syncPhase === "turn"
                   : isUserTurn && !gameOver && !turn.roll
               }
               secretEnabled={canEnterSecretCommand}
@@ -3740,6 +4065,7 @@ function App() {
               localPlayerId={selectedPlayerId}
               hostPlayerId={syncHostPlayerId}
               readyPlayerIds={readyPlayerIds}
+              connectionStatuses={visibleConnectionStatuses}
               syncMessage={syncMessage}
               onRemove={isHost ? removeSyncPlayer : undefined}
             />
@@ -3870,6 +4196,7 @@ function App() {
 
 function SyncLobby({
   compact = false,
+  connectionStatuses = {},
   hostPlayerId,
   isHost,
   localPlayerId,
@@ -3883,6 +4210,7 @@ function SyncLobby({
   syncMessage,
 }: {
   compact?: boolean;
+  connectionStatuses?: SyncConnectionStatuses;
   hostPlayerId: string | null;
   isHost: boolean;
   localPlayerId: string | null;
@@ -3952,6 +4280,9 @@ function SyncLobby({
         {players.map((player) => {
           const isReady = readyPlayerIds.includes(player.id);
           const isLocalPlayer = player.id === localPlayerId;
+          const connectionStatus = connectionStatuses[player.id] ?? "connected";
+          const statusClass = connectionStatus === "reconnecting" && !isReady ? "reconnecting" : isReady ? "ready" : "waiting";
+          const statusLabel = statusClass === "reconnecting" ? "Reconnecting" : isReady ? "Ready" : "Waiting";
 
           return (
             <div
@@ -3965,8 +4296,8 @@ function SyncLobby({
               key={player.id}
             >
               {compact ? (
-                <span className={isReady ? "sync-player-status ready" : "sync-player-status waiting"} aria-label={isReady ? "Ready" : "Waiting"}>
-                  {isReady ? <Check size={17} /> : <CircleDashed size={17} />}
+                <span className={`sync-player-status ${statusClass}`} aria-label={statusLabel}>
+                  {statusClass === "ready" ? <Check size={17} /> : statusClass === "reconnecting" ? <Wifi size={17} /> : <CircleDashed size={17} />}
                 </span>
               ) : null}
               {canDrag ? (

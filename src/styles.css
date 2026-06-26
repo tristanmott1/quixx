@@ -450,6 +450,11 @@ button:focus-visible {
   background: var(--surface-soft);
 }
 
+.sync-player-status.reconnecting {
+  color: #b45309;
+  background: #fef3c7;
+}
+
 .sync-static-icon {
   pointer-events: none;
 }

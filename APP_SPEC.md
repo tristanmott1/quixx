@@ -493,6 +493,13 @@ Player-to-host events include:
 - Ready payload with shared consequences and that player's score snapshot.
 - Voluntary exit.
 
+Connection-health events include:
+
+- Temporary reconnecting status.
+- Recovered connected status.
+- Confirmed gone status after a grace timeout.
+- Lightweight heartbeat ping/pong messages.
+
 Sync score-card requirements:
 
 - Lobby state should include the host-selected score-card id.
@@ -507,6 +514,92 @@ Sync score-card requirements:
 - A joiner should not persist the host-selected score-card id as that joiner's personal score-card choice.
 
 The host should be the source of truth for dice results. When the current player taps the dice in sync mode, that device sends a roll request to the host. The host validates that the request came from the current active player for the current `turnId`, generates the roll for the currently visible dice, and broadcasts the roll result to everyone.
+
+### Sync Connection Robustness
+
+The first robustness pass should make temporary connection trouble non-destructive.
+
+Connection health is separate from game membership:
+
+- `connected`: messages are flowing normally.
+- `reconnecting`: the transport is temporarily uncertain, but the player is still active in the game.
+- `gone`: the connection has failed or timed out, and the existing exit/removal/session-ended behavior applies.
+
+Only `gone` changes game membership.
+
+`reconnecting` must not:
+
+- Remove the player.
+- Skip the player's turn.
+- Clear the player's Ready payload.
+- Advance the turn.
+- Apply row closures.
+- Apply penalties.
+- End the game.
+
+If any active player is `reconnecting`:
+
+- That player still counts as active.
+- If that player has not pressed Ready, the turn cannot auto-advance.
+- If that player has already pressed Ready, the Ready payload remains valid.
+- If that player is the current turn player, the turn remains on that player.
+- The host can still manually remove the player if the group decides to continue without them.
+
+Transport state handling:
+
+- WebRTC `connected` should mark the player/host as connected and clear any reconnecting timer.
+- WebRTC `disconnected` should mark the player/host as reconnecting and start a grace timer.
+- WebRTC `failed` or `closed` should mark the connection gone immediately.
+- If a reconnecting connection returns to connected before the grace timer expires, the game continues with no state mutation.
+- If the grace timer expires while still reconnecting, treat the connection as gone and use the existing host-removal or host-ended-session behavior.
+- The initial grace timeout should be long enough for brief phone sleep or app switching, approximately 60 seconds.
+
+Heartbeat behavior:
+
+- Host and joiners should exchange lightweight heartbeat messages while sync play is active.
+- Heartbeats are only a transport-health signal.
+- Missed heartbeats may mark a connection as reconnecting.
+- Missed heartbeats must not directly remove players, advance turns, clear Ready payloads, or change score state.
+- Heartbeat state must be ignored for stale or closed transports.
+
+Host disconnect behavior:
+
+- The host remains permanent.
+- A joiner that loses contact with the host should first enter `reconnecting` and show a small status.
+- If the host reconnects before timeout, the joiner continues in the same synced game.
+- If the host does not reconnect before timeout, the sync session ends for that joiner with the existing ended-session message.
+- Full host recovery after timeout is out of scope for this pass.
+
+Joiner disconnect behavior:
+
+- The host should mark the joiner as `reconnecting`, not immediately remove them.
+- The reconnecting joiner stays in the active player list.
+- The host should show the joiner as reconnecting in the synced player list.
+- If the joiner recovers before timeout, status returns to connected.
+- If the joiner times out, the host applies the existing player removal behavior.
+
+Wake lock behavior:
+
+- During active sync play or sync game over, the app should request a screen wake lock when available.
+- The app should release the wake lock when leaving sync play/game over or ending the session.
+- If the page becomes visible again after being hidden, the app should try to reacquire the wake lock.
+- Wake lock is best effort. Failure, denial, or lack of browser support must not affect game logic.
+- Wake lock is not a substitute for reconnect handling because mobile browsers may still suspend background tabs or apps.
+
+Status UI:
+
+- Keep connection status small and app-native.
+- Host sees which player is reconnecting.
+- Joiner sees when the host is reconnecting.
+- Recovered connections should clear the reconnecting status.
+- Timed-out connections should use the existing removed/session-ended messaging.
+
+Out of scope for this first pass:
+
+- QR-based late reconnect after timeout.
+- Replacing a peer connection with a new QR handshake.
+- Persisting a live sync session through reload or app close.
+- Replaying full game state to a rejoined player.
 
 ### Sync Callback State
 
@@ -548,9 +641,11 @@ The original host remains the host for the entire synced session.
 
 Host authority cannot be transferred in v1.
 
-If the host exits intentionally, disconnects unexpectedly, closes the app, loses power, or loses connection, the synced session ends for every player.
+If the host exits intentionally, closes the app, loses power, or reaches confirmed `gone` connection status, the synced session ends for every player.
 
-Host exit or host disconnect is not a Qwixx rules-based game over. It ends the sync session and returns players to the Sync tab with a session-ended message.
+Temporary host connection loss should first be treated as `reconnecting` according to the sync connection robustness rules.
+
+Host exit or confirmed host loss is not a Qwixx rules-based game over. It ends the sync session and returns players to the Sync tab with a session-ended message.
 
 There is no host recovery in v1.
 
@@ -560,13 +655,21 @@ Non-host players can exit at any time.
 
 The host can remove a connected player if needed, including when that player is slow or disconnected.
 
-Exit and host removal use the same game behavior:
+Voluntary exit, host removal, and confirmed `gone` status use the same game behavior:
 
 - The player is removed from the active player list.
 - The player is removed from the ready-required set.
 - Future turns skip that player.
 - The removed player is gone for the rest of the synced game.
 - There is no late reconnect in v1.
+
+Temporary `reconnecting` status is not removal:
+
+- The player remains in the active player list.
+- The player remains in the ready-required set.
+- Future turns do not skip that player.
+- Existing Ready payloads remain staged.
+- The host can still manually remove that player if needed.
 
 If a non-current player exits or is removed during `turn`:
 
@@ -614,8 +717,9 @@ In sync mode:
 - Existing WebRTC connections stay open after host Start over.
 - In the returned lobby, the host can rearrange order, randomize order, remove players, scan new players, and edit the selected score card before pressing Start again.
 - Non-host players do not see or use Start over.
-- If the host exits or disconnects, the synced session ends for everyone.
-- Host exit or disconnect returns players to the Sync tab with a session-ended message.
+- If the host exits or reaches confirmed `gone` connection status, the synced session ends for everyone.
+- Temporary host connection loss shows reconnecting status first.
+- Host exit or confirmed host loss returns players to the Sync tab with a session-ended message.
 
 The legal options hint toggle:
 
@@ -1427,7 +1531,7 @@ In sync mode, the game ends when any of these conditions becomes true:
 
 - Automatic advance applies Ready payloads that bring the shared closed-row count to two.
 - Automatic advance applies a Ready payload from any player who reached 4 penalties.
-- The host disconnects unexpectedly and the synced session ends.
+- The host reaches confirmed `gone` connection status and the synced session ends.
 - The host intentionally ends the synced session.
 - Player exits or removals leave fewer than one active player.
 
@@ -1546,9 +1650,10 @@ Do not persist sync score snapshots:
 Do not rely on local persistence to recover a live sync session:
 
 - WebRTC connections do not survive a full app reload or app close in v1.
-- If a non-host player reloads, closes the app, or disconnects, that player is treated as gone.
-- If the host reloads, closes the app, loses connection, or disconnects unexpectedly, the synced session ends for everyone.
-- There is no late reconnect in v1.
+- If a non-host player reloads, closes the app, or reaches confirmed `gone` connection status, that player is treated as gone.
+- If the host reloads, closes the app, or reaches confirmed `gone` connection status, the synced session ends for everyone.
+- Temporary `reconnecting` status is runtime-only and not persisted.
+- There is no late reconnect after confirmed `gone` status in v1.
 - The host room is runtime shared state, not a recoverable backend session.
 
 Suggested storage keys:
@@ -1849,6 +1954,75 @@ Transport requirements:
 - Failed answer acceptance should not leave a stale pending offer that appears usable.
 - Broadcasting should only send to opened channels.
 
+### Sync Connection Robustness Pass
+
+Problem to fix:
+
+- Mobile browsers may briefly suspend, freeze, or interrupt WebRTC when the screen sleeps, the user switches apps, or the OS saves resources.
+- The app currently treats temporary WebRTC `disconnected` status too much like a final disconnect.
+- Temporary connection uncertainty should pause sync progress, not mutate game state.
+
+Required transport changes:
+
+- Replace immediate close callbacks for WebRTC `disconnected` with a provisional reconnecting callback.
+- Keep WebRTC `failed` and `closed` as terminal gone callbacks.
+- Add a reconnect grace timer, initially about 60 seconds.
+- Clear the grace timer if the peer connection returns to `connected`.
+- Fire a gone callback only after timeout or terminal failure.
+- Ensure timers are cleared when a peer/transport is explicitly closed or removed.
+- Do not call gone/closed callbacks multiple times for the same peer.
+
+Required app-state changes:
+
+- Track connection status outside the game membership list.
+- Host tracks a map of joiner id to `connected`, `reconnecting`, or `gone`.
+- Joiner tracks host status as `connected`, `reconnecting`, or `gone`.
+- `reconnecting` players remain active players.
+- `gone` uses the existing removal/session-ended behavior.
+- Manual host removal still works while a player is reconnecting.
+
+Required turn-flow gates:
+
+- Do not auto-advance a turn while any active player is reconnecting and not already Ready.
+- Do not discard the current turn merely because the current player is reconnecting.
+- Do not skip the current player merely because the current player is reconnecting.
+- Preserve current-turn Ready payloads for reconnecting players.
+- If a reconnecting player recovers, continue without changing score, turn, or Ready state.
+- If a reconnecting player times out, apply the existing confirmed-removal rules.
+
+Required heartbeat behavior:
+
+- Add lightweight heartbeat messages while sync play or sync game over is active.
+- Host and joiners should send heartbeat messages on a simple interval.
+- Heartbeat misses may mark a connection reconnecting.
+- Heartbeats must never directly advance turns, remove players, clear Ready state, or change score state.
+- Ignore heartbeat messages from stale transports or unknown players.
+
+Required wake-lock behavior:
+
+- Request a screen wake lock during sync play and sync game over when available.
+- Release the wake lock outside sync play/game over and when the sync session ends.
+- Re-request the wake lock after the page becomes visible again.
+- Treat wake-lock support, denial, and release as best-effort; no game logic may depend on wake lock success.
+
+Required status UI:
+
+- Show a small reconnecting indicator for affected players in the synced player rows.
+- Host should see which joiners are reconnecting.
+- Joiners should see when the host is reconnecting.
+- Clear reconnecting UI immediately when the connection recovers.
+- Use existing removed/session-ended messaging only after confirmed gone status.
+
+Verification requirements:
+
+- Source checks should verify that `disconnected` no longer calls final removal/session end immediately.
+- Source checks should verify grace timer cleanup on recover, close, and removal.
+- Transport checks should verify normal host/join connection still succeeds and status callbacks report `connected`.
+- Transport checks should verify heartbeat messages move over the data channel.
+- Source checks should verify auto-advance is gated while an unready active player is reconnecting.
+- Source checks should verify reconnecting status is rendered in synced player rows.
+- Source checks should verify wake-lock request/release and `visibilitychange` reacquire behavior.
+
 ### Sync Phase Cleanup
 
 Problem to fix:
@@ -2101,7 +2275,8 @@ Before considering an implementation complete:
 - Verify sync non-host Exit removes that player and future turns skip them.
 - Verify sync current-player exit or host removal discards the current turn and skips to the next active player.
 - Verify sync host Exit is allowed even when other players remain and sends `sessionEnded`.
-- Verify unexpected host disconnect ends the synced session for everyone.
+- Verify temporary host disconnect shows reconnecting status before session end.
+- Verify confirmed host gone status ends the synced session for everyone.
 - Verify local row closing, staged locks, die removal after Next, and multiple row closures.
 - Verify sync row closing, shared row closure reveal on automatic advance, die removal after automatic advance, and multiple row closures.
 - Verify mixed-number card progression uses visual order.
@@ -2111,5 +2286,6 @@ Before considering an implementation complete:
 - Capture visual verification screenshots for mixed-color compact picker previews and full Play page rows so segment divider alignment can be inspected.
 - Verify scoring, penalties, and game-over conditions in both modes.
 - Verify local reload persistence.
-- Verify sync reload or disconnect behavior matches the no-late-reconnect v1 rule.
+- Verify sync reload or confirmed gone behavior matches the no-late-reconnect-after-timeout v1 rule.
+- Verify temporary reconnecting behavior does not remove players or mutate game state.
 - Verify PWA build output and service worker generation.

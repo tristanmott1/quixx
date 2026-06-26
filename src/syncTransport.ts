@@ -10,6 +10,8 @@ export type SyncWireMessage = {
   [key: string]: unknown;
 };
 
+export type SyncConnectionStatus = "connected" | "reconnecting" | "gone";
+
 export type SyncOfferPayload = {
   kind: "qwixx-sync-offer";
   version: 1;
@@ -37,18 +39,23 @@ type PendingOffer = {
 
 type HostPeer = {
   channel: RTCDataChannel;
+  closedNotified: boolean;
   peerConnection: RTCPeerConnection;
   playerName: string;
+  reconnectTimer: number;
+  status: SyncConnectionStatus;
 };
 
 type SyncTransportCallbacks = {
   onPeerClosed?: (playerId: string) => void;
   onPeerOpen?: (playerId: string) => void;
+  onPeerStatus?: (playerId: string, status: SyncConnectionStatus) => void;
   onMessage?: (playerId: string, message: SyncWireMessage) => void;
 };
 
 const CHANNEL_NAME = "qwixx";
 const ICE_TIMEOUT_MS = 1800;
+const DEFAULT_RECONNECT_GRACE_MS = 60000;
 const COMPACT_OFFER_PREFIX = "QWO:";
 const COMPACT_ANSWER_PREFIX = "QWA:";
 const QR_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
@@ -354,6 +361,7 @@ export class SyncHostTransport {
   private callbacks: SyncTransportCallbacks;
   private pendingOffers = new Map<string, PendingOffer>();
   private peers = new Map<string, HostPeer>();
+  private reconnectGraceMs: number;
   private roomId: string;
   private hostPlayerId: string;
   private hostName: string;
@@ -362,16 +370,19 @@ export class SyncHostTransport {
     callbacks,
     hostName,
     hostPlayerId,
+    reconnectGraceMs = DEFAULT_RECONNECT_GRACE_MS,
     roomId,
   }: {
     callbacks: SyncTransportCallbacks;
     hostName: string;
     hostPlayerId: string;
+    reconnectGraceMs?: number;
     roomId: string;
   }) {
     this.callbacks = callbacks;
     this.hostName = hostName;
     this.hostPlayerId = hostPlayerId;
+    this.reconnectGraceMs = reconnectGraceMs;
     this.roomId = roomId;
   }
 
@@ -417,7 +428,13 @@ export class SyncHostTransport {
       throw new Error("this answer does not match the current host QR.");
     }
 
-    attachMessageHandler(pending.channel, answer.playerId, this.callbacks);
+    attachMessageHandler(pending.channel, answer.playerId, {
+      ...this.callbacks,
+      onMessage: (playerId, message) => {
+        this.markPeerConnected(playerId);
+        this.callbacks.onMessage?.(playerId, message);
+      },
+    });
 
     try {
       await pending.peerConnection.setRemoteDescription(answer.sdp);
@@ -430,20 +447,18 @@ export class SyncHostTransport {
     this.pendingOffers.delete(answer.offerId);
     this.peers.set(answer.playerId, {
       channel: pending.channel,
+      closedNotified: false,
       peerConnection: pending.peerConnection,
       playerName: answer.playerName,
+      reconnectTimer: 0,
+      status: "connected",
     });
 
     this.callbacks.onPeerOpen?.(answer.playerId);
-    pending.channel.addEventListener("close", () => this.callbacks.onPeerClosed?.(answer.playerId));
+    this.callbacks.onPeerStatus?.(answer.playerId, "connected");
+    pending.channel.addEventListener("close", () => this.markPeerGone(answer.playerId));
     pending.peerConnection.addEventListener("connectionstatechange", () => {
-      if (
-        pending.peerConnection.connectionState === "closed" ||
-        pending.peerConnection.connectionState === "failed" ||
-        pending.peerConnection.connectionState === "disconnected"
-      ) {
-        this.callbacks.onPeerClosed?.(answer.playerId);
-      }
+      this.handlePeerConnectionState(answer.playerId, pending.peerConnection.connectionState);
     });
 
     return {
@@ -463,9 +478,8 @@ export class SyncHostTransport {
       return;
     }
 
-    peer.channel.close();
-    peer.peerConnection.close();
     this.peers.delete(playerId);
+    this.closePeer(peer);
   }
 
   close() {
@@ -475,11 +489,77 @@ export class SyncHostTransport {
     });
     this.pendingOffers.clear();
 
-    this.peers.forEach((peer) => {
-      peer.channel.close();
-      peer.peerConnection.close();
-    });
+    this.peers.forEach((peer) => this.closePeer(peer));
     this.peers.clear();
+  }
+
+  private handlePeerConnectionState(playerId: string, state: RTCPeerConnectionState) {
+    if (state === "connected") {
+      this.markPeerConnected(playerId);
+      return;
+    }
+
+    if (state === "disconnected") {
+      this.markPeerReconnecting(playerId);
+      return;
+    }
+
+    if (state === "failed" || state === "closed") {
+      this.markPeerGone(playerId);
+    }
+  }
+
+  private markPeerConnected(playerId: string) {
+    const peer = this.peers.get(playerId);
+
+    if (!peer || peer.closedNotified) {
+      return;
+    }
+
+    window.clearTimeout(peer.reconnectTimer);
+    peer.reconnectTimer = 0;
+
+    if (peer.status === "connected") {
+      return;
+    }
+
+    peer.status = "connected";
+    this.callbacks.onPeerStatus?.(playerId, "connected");
+  }
+
+  private markPeerReconnecting(playerId: string) {
+    const peer = this.peers.get(playerId);
+
+    if (!peer || peer.closedNotified || peer.status === "reconnecting") {
+      return;
+    }
+
+    peer.status = "reconnecting";
+    this.callbacks.onPeerStatus?.(playerId, "reconnecting");
+    window.clearTimeout(peer.reconnectTimer);
+    peer.reconnectTimer = window.setTimeout(() => this.markPeerGone(playerId), this.reconnectGraceMs);
+  }
+
+  private markPeerGone(playerId: string) {
+    const peer = this.peers.get(playerId);
+
+    if (!peer || peer.closedNotified) {
+      return;
+    }
+
+    peer.status = "gone";
+    peer.closedNotified = true;
+    window.clearTimeout(peer.reconnectTimer);
+    peer.reconnectTimer = 0;
+    this.callbacks.onPeerStatus?.(playerId, "gone");
+    this.callbacks.onPeerClosed?.(playerId);
+  }
+
+  private closePeer(peer: HostPeer) {
+    peer.closedNotified = true;
+    window.clearTimeout(peer.reconnectTimer);
+    peer.channel.close();
+    peer.peerConnection.close();
   }
 
   private closePendingOffer(offerId: string) {
@@ -499,15 +579,23 @@ export class SyncJoinTransport {
   private callbacks: Omit<SyncTransportCallbacks, "onPeerClosed" | "onPeerOpen"> & {
     onClosed?: () => void;
     onOpen?: () => void;
+    onStatus?: (status: SyncConnectionStatus) => void;
   };
   private channel: RTCDataChannel | null = null;
+  private closedNotified = false;
+  private locallyClosed = false;
   private peerConnection: RTCPeerConnection | null = null;
+  private reconnectGraceMs: number;
+  private reconnectTimer = 0;
+  private status: SyncConnectionStatus = "connected";
 
   constructor(callbacks: Omit<SyncTransportCallbacks, "onPeerClosed" | "onPeerOpen"> & {
     onClosed?: () => void;
     onOpen?: () => void;
-  }) {
+    onStatus?: (status: SyncConnectionStatus) => void;
+  }, reconnectGraceMs = DEFAULT_RECONNECT_GRACE_MS) {
     this.callbacks = callbacks;
+    this.reconnectGraceMs = reconnectGraceMs;
   }
 
   async createAnswer(value: string, player: { id: string; name: string }) {
@@ -518,25 +606,28 @@ export class SyncJoinTransport {
     }
 
     const peerConnection = createPeerConnection();
+    this.closedNotified = false;
+    this.locallyClosed = false;
     this.peerConnection = peerConnection;
 
     peerConnection.addEventListener("datachannel", (event) => {
       this.channel = event.channel;
-      attachMessageHandler(event.channel, offer.hostPlayerId, this.callbacks);
+      attachMessageHandler(event.channel, offer.hostPlayerId, {
+        ...this.callbacks,
+        onMessage: (playerId, message) => {
+          this.markConnected();
+          this.callbacks.onMessage?.(playerId, message);
+        },
+      });
       event.channel.addEventListener("open", () => {
+        this.markConnected();
         this.callbacks.onOpen?.();
         this.send({ type: "join", playerId: player.id, playerName: player.name });
       });
-      event.channel.addEventListener("close", () => this.callbacks.onClosed?.());
+      event.channel.addEventListener("close", () => this.markGone());
     });
     peerConnection.addEventListener("connectionstatechange", () => {
-      if (
-        peerConnection.connectionState === "closed" ||
-        peerConnection.connectionState === "failed" ||
-        peerConnection.connectionState === "disconnected"
-      ) {
-        this.callbacks.onClosed?.();
-      }
+      this.handleConnectionState(peerConnection.connectionState);
     });
 
     await peerConnection.setRemoteDescription(offer.sdp);
@@ -571,9 +662,69 @@ export class SyncJoinTransport {
   }
 
   close() {
+    this.locallyClosed = true;
+    this.closedNotified = true;
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = 0;
     this.channel?.close();
     this.peerConnection?.close();
     this.channel = null;
     this.peerConnection = null;
+  }
+
+  private handleConnectionState(state: RTCPeerConnectionState) {
+    if (state === "connected") {
+      this.markConnected();
+      return;
+    }
+
+    if (state === "disconnected") {
+      this.markReconnecting();
+      return;
+    }
+
+    if (state === "failed" || state === "closed") {
+      this.markGone();
+    }
+  }
+
+  private markConnected() {
+    if (this.locallyClosed || this.closedNotified) {
+      return;
+    }
+
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = 0;
+
+    if (this.status === "connected") {
+      return;
+    }
+
+    this.status = "connected";
+    this.callbacks.onStatus?.("connected");
+  }
+
+  private markReconnecting() {
+    if (this.locallyClosed || this.closedNotified || this.status === "reconnecting") {
+      return;
+    }
+
+    this.status = "reconnecting";
+    this.callbacks.onStatus?.("reconnecting");
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = window.setTimeout(() => this.markGone(), this.reconnectGraceMs);
+  }
+
+  private markGone() {
+    if (this.locallyClosed || this.closedNotified) {
+      return;
+    }
+
+    this.status = "gone";
+    this.closedNotified = true;
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = 0;
+    this.callbacks.onStatus?.("gone");
+    this.callbacks.onClosed?.();
   }
 }
