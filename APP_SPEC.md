@@ -788,10 +788,11 @@ The password is stored in the repository as a small constant:
 
 The password can be entered only from sync play or sync game over:
 
-- In sync `turn`, the local player must not have pressed Ready.
 - In sync `turn`, if it is the local player's turn, the dice must already be rolled before the password can be entered.
 - In sync `turn`, if it is not the local player's turn, the password can be started before the synced roll arrives.
 - A synced roll arriving from another player must not interrupt or reset an in-progress password sequence.
+- In sync `turn`, the password remains available after the local player has pressed Ready.
+- If the turn advances while the local player is viewing the secret page, the app immediately returns to the normal Play page so the user is present for the start of the next turn or the synced game-over state.
 - In sync `gameOver`, Ready is no longer possible, so the password can always be entered from the white dice.
 - The password is not available in local mode, sync lobby, QR scan pages, picker pages, or initial Home setup.
 
@@ -823,6 +824,7 @@ The secret page reads from pending Ready snapshots, finalized `syncPlayerScores`
 - Otherwise, opponent sections use the latest finalized `syncPlayerScores` snapshot.
 - The local user's own section may use the current local rows, penalties, and staged turn state so it matches what the user already sees on the Play page.
 - If the local user has pressed Ready, the local section should match the local user's submitted snapshot.
+- If the secret page is opened after Ready, it still reads from the same pending Ready snapshots and finalized score snapshots; no extra hidden scoring state is stored.
 - No score-card controls on the secret page are interactive.
 
 ## Score Card Layout
@@ -1268,9 +1270,10 @@ Hidden password handling:
   - mode is sync, and
   - page is play, and
   - phase is `turn` or `gameOver`, and
-  - local player has not pressed Ready when phase is `turn`, and
   - if local player is current player during `turn`, the roll has already happened.
   - if local player is not current player during `turn`, the synced roll does not need to exist yet.
+- Opening the secret page records the current `syncTurnId`.
+- If the recorded secret-page turn id no longer matches `syncTurnId`, close the secret page, return to normal sync Play, and reset password progress.
 - A wrong white-die press resets the progress, except `top` immediately starts progress at step 1.
 - Any normal play-page button or score-card action resets the progress.
 - Tapping colored dice, empty dice-grid space, or receiving a remote roll does not reset progress.
@@ -1297,6 +1300,8 @@ Testing requirements:
 - Verify the secret page is unreachable on the current player's sync turn before rolling.
 - Verify the password can be started on a non-current player's sync turn before the synced roll arrives.
 - Verify the synced roll arriving does not reset an in-progress password sequence.
+- Verify the correct sequence opens the secret page after the local player has pressed Ready.
+- Verify a synced turn advance while viewing the secret page returns to the normal Play page.
 - Verify a wrong sequence resets and `top` can restart the sequence.
 - Verify the correct sequence opens the secret page before Ready.
 - Verify the correct sequence opens the secret page during sync game over.

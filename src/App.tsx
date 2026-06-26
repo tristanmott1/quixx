@@ -1376,6 +1376,7 @@ function App() {
   const [confirmAction, setConfirmAction] = useState<"rollUndo" | "exit" | "startOver" | null>(null);
   const [draggingPlayerId, setDraggingPlayerId] = useState<string | null>(null);
   const [secretProgress, setSecretProgress] = useState(0);
+  const [secretScoreTurnId, setSecretScoreTurnId] = useState<string | null>(null);
   const [rollAnimationKey, setRollAnimationKey] = useState(0);
   const draftNameInputRef = useRef<HTMLInputElement>(null);
   const hostTransportRef = useRef<SyncHostTransport | null>(null);
@@ -1447,7 +1448,7 @@ function App() {
   const canEnterSecretScorePassword =
     isSyncMode &&
     page === "play" &&
-    (syncPhase === "gameOver" || (syncPhase === "turn" && !isLocalReady && (!isUserTurn || Boolean(turn.roll))));
+    (syncPhase === "gameOver" || (syncPhase === "turn" && (!isUserTurn || Boolean(turn.roll))));
 
   function syncLatestState(updates: Partial<LatestSyncState>) {
     latestRef.current = { ...latestRef.current, ...updates };
@@ -1639,6 +1640,7 @@ function App() {
 
     if (nextProgress >= SECRET_SCORE_PASSWORD.length) {
       resetSecretProgress();
+      setSecretScoreTurnId(syncTurnId);
       setPage("secretScores");
       return;
     }
@@ -1664,6 +1666,7 @@ function App() {
 
   function closeSecretScores() {
     resetSecretProgress();
+    setSecretScoreTurnId(null);
     setPage("play");
   }
 
@@ -1730,6 +1733,16 @@ function App() {
       setSelectedPlayerId(null);
     }
   }, [mode, players, selectedPlayerId]);
+
+  useEffect(() => {
+    if (page !== "secretScores" || !secretScoreTurnId || secretScoreTurnId === syncTurnId) {
+      return;
+    }
+
+    resetSecretProgress();
+    setSecretScoreTurnId(null);
+    setPage("play");
+  }, [page, secretScoreTurnId, syncTurnId]);
 
   useEffect(() => {
     if (mode !== "local" || page !== "play" || gamePlayers.length === 0 || !selectedPlayerId) {

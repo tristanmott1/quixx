@@ -170,8 +170,16 @@ async function runSourceChecks() {
   assert(!appSource.includes("data-secret-die={secretPress ?? undefined}"), "Visible dice do not carry secret input hooks.");
   assert(/\.die\s*\{[^}]*pointer-events:\s*none;/s.test(styleSource), "Visible dice stay pointer-inert during hidden password input.");
   assert(
-    appSource.includes("!isLocalReady && (!isUserTurn || Boolean(turn.roll))"),
+    appSource.includes("syncPhase === \"turn\" && (!isUserTurn || Boolean(turn.roll))"),
     "Opponent-turn secret input is available before the synced roll arrives.",
+  );
+  const secretGate = appSource.match(/const canEnterSecretScorePassword =[\s\S]*?;\n\n  function syncLatestState/);
+  assert(secretGate && !secretGate[0].includes("!isLocalReady"), "Ready does not block secret score access.");
+  assert(appSource.includes("secretScoreTurnId"), "Secret score page tracks the turn it opened on.");
+  assert(appSource.includes("setSecretScoreTurnId(syncTurnId);"), "Opening secret scores records the current synced turn.");
+  assert(
+    appSource.includes('page !== "secretScores" || !secretScoreTurnId || secretScoreTurnId === syncTurnId'),
+    "Secret scores close when the synced turn advances.",
   );
   assert(
     appSource.includes('className={value ? `die ${color} rolled` : `die ${color} idle`}'),
