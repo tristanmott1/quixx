@@ -24,6 +24,7 @@ import QRCode from "qrcode";
 import {
   type CSSProperties,
   type FormEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   useEffect,
   useLayoutEffect,
@@ -61,7 +62,7 @@ import {
 } from "./scoreCards";
 import { SyncHostTransport, SyncJoinTransport, type SyncWireMessage } from "./syncTransport";
 
-type Page = "home" | "picker" | "play";
+type Page = "home" | "picker" | "play" | "secretScores";
 type HomeTab = "local" | "sync";
 type PlayMode = "local" | "sync";
 type SyncRole = "host" | "joiner" | null;
@@ -122,12 +123,23 @@ type SyncReadyPayload = {
   playerId: string;
   closedRows: RowColor[];
   reachedFourPenalties: boolean;
+  scoreSnapshot: ScoreSnapshot;
 };
 
 type SyncClosedBy = {
   playerId: string;
   row: RowColor;
 };
+
+type ScoreSnapshot = {
+  selectedByRow: Record<RowColor, number[]>;
+  locksByRow: Record<RowColor, RowState["lock"]>;
+  penalties: number;
+};
+
+type SyncPlayerScores = Record<string, ScoreSnapshot>;
+
+type SecretDiePress = "top" | "bottom";
 
 type BarcodeDetectorResult = {
   rawValue: string;
@@ -172,6 +184,7 @@ type LatestSyncState = {
   selectedPlayerId: string | null;
   showHints: boolean;
   syncHintsLockedOff: boolean;
+  syncPlayerScores: SyncPlayerScores;
   gameScoreCardId: number;
   syncScoreCardId: number | null;
 };
@@ -191,6 +204,7 @@ type PlayStatePatch = {
   selectedPlayerId?: string | null;
   showHints?: boolean;
   syncHintsLockedOff?: boolean;
+  syncPlayerScores?: SyncPlayerScores;
   gameScoreCardId?: number;
   syncScoreCardId?: number | null;
   rollAnimationKey?: number;
@@ -223,6 +237,7 @@ const SUM_NUMBERS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] as const;
 const SCORE_VALUES = [0, 1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66, 78] as const;
 const MAX_PENALTIES = 4;
 const PENALTY_POINTS = 5;
+const SECRET_SCORE_PASSWORD: SecretDiePress[] = ["top", "bottom", "top", "top", "bottom", "bottom"];
 
 const DICE_LAYOUT = [
   { key: "whiteA", color: "white", row: 1, column: 1 },
@@ -259,6 +274,24 @@ function createEmptyRows(): RowsState {
     yellow: { selected: [], lock: "none" },
     green: { selected: [], lock: "none" },
     blue: { selected: [], lock: "none" },
+  };
+}
+
+function createBlankScoreSnapshot(): ScoreSnapshot {
+  return {
+    selectedByRow: {
+      red: [],
+      yellow: [],
+      green: [],
+      blue: [],
+    },
+    locksByRow: {
+      red: "none",
+      yellow: "none",
+      green: "none",
+      blue: "none",
+    },
+    penalties: 0,
   };
 }
 
@@ -327,6 +360,41 @@ function cloneRows(rows: RowsState): RowsState {
     green: { selected: [...rows.green.selected], lock: rows.green.lock },
     blue: { selected: [...rows.blue.selected], lock: rows.blue.lock },
   };
+}
+
+function scoreSnapshotFromRows(rows: RowsState, penalties: number): ScoreSnapshot {
+  return {
+    selectedByRow: {
+      red: [...rows.red.selected],
+      yellow: [...rows.yellow.selected],
+      green: [...rows.green.selected],
+      blue: [...rows.blue.selected],
+    },
+    locksByRow: {
+      red: rows.red.lock,
+      yellow: rows.yellow.lock,
+      green: rows.green.lock,
+      blue: rows.blue.lock,
+    },
+    penalties: Math.max(0, Math.min(MAX_PENALTIES, penalties)),
+  };
+}
+
+function cloneScoreSnapshot(snapshot: ScoreSnapshot): ScoreSnapshot {
+  return {
+    selectedByRow: {
+      red: [...snapshot.selectedByRow.red],
+      yellow: [...snapshot.selectedByRow.yellow],
+      green: [...snapshot.selectedByRow.green],
+      blue: [...snapshot.selectedByRow.blue],
+    },
+    locksByRow: { ...snapshot.locksByRow },
+    penalties: snapshot.penalties,
+  };
+}
+
+function cloneSyncPlayerScores(scores: SyncPlayerScores): SyncPlayerScores {
+  return Object.fromEntries(Object.entries(scores).map(([playerId, snapshot]) => [playerId, cloneScoreSnapshot(snapshot)]));
 }
 
 function cloneTurnCore(turn: TurnCore): TurnCore {
@@ -1012,6 +1080,7 @@ function createReadyPayload(
   scoreCard: ScoreCardPreset,
   turnId: string,
   playerId: string,
+  rows: RowsState,
   penalties: number,
   turn: TurnDraft,
 ): SyncReadyPayload {
@@ -1020,6 +1089,7 @@ function createReadyPayload(
     playerId,
     closedRows: getOwnClosedRows(scoreCard, turn),
     reachedFourPenalties: penalties + (turn.penalty ? 1 : 0) >= MAX_PENALTIES,
+    scoreSnapshot: createScoreSnapshot(scoreCard, rows, penalties, turn),
   };
 }
 
@@ -1066,6 +1136,89 @@ function commitLocalTurnState(scoreCard: ScoreCardPreset, rows: RowsState, penal
   };
 }
 
+function createScoreSnapshot(scoreCard: ScoreCardPreset, rows: RowsState, penalties: number, turn: TurnDraft) {
+  const committed = commitLocalTurnState(scoreCard, rows, penalties, turn);
+  return scoreSnapshotFromRows(committed.rows, committed.penalties);
+}
+
+function rowsFromScoreSnapshot(scoreCard: ScoreCardPreset, snapshot: ScoreSnapshot): RowsState {
+  const rows = createEmptyRows();
+
+  ROW_COLORS.forEach((row) => {
+    const allowedNumbers = getScoreCardNumbers(scoreCard, row);
+    rows[row] = {
+      selected: snapshot.selectedByRow[row]
+        .filter((number) => allowedNumbers.includes(number))
+        .sort((left, right) => visualIndex(scoreCard, row, left) - visualIndex(scoreCard, row, right)),
+      lock: snapshot.locksByRow[row],
+    };
+  });
+
+  return rows;
+}
+
+function normalizeScoreSnapshot(value: unknown, scoreCard: ScoreCardPreset): ScoreSnapshot {
+  if (!value || typeof value !== "object") {
+    return createBlankScoreSnapshot();
+  }
+
+  const snapshot = value as Partial<ScoreSnapshot>;
+  const selectedByRow = snapshot.selectedByRow && typeof snapshot.selectedByRow === "object" ? snapshot.selectedByRow : {};
+  const locksByRow = snapshot.locksByRow && typeof snapshot.locksByRow === "object" ? snapshot.locksByRow : {};
+  const penalties = Number(snapshot.penalties);
+  const nextSnapshot = createBlankScoreSnapshot();
+
+  ROW_COLORS.forEach((row) => {
+    const rawSelected = (selectedByRow as Partial<Record<RowColor, unknown>>)[row];
+    const rawLock = (locksByRow as Partial<Record<RowColor, unknown>>)[row];
+    const allowedNumbers = getScoreCardNumbers(scoreCard, row);
+
+    nextSnapshot.selectedByRow[row] = Array.isArray(rawSelected)
+      ? Array.from(new Set(rawSelected.map(Number)))
+          .filter((number) => allowedNumbers.includes(number))
+          .sort((left, right) => visualIndex(scoreCard, row, left) - visualIndex(scoreCard, row, right))
+      : [];
+    nextSnapshot.locksByRow[row] = rawLock === "own" || rawLock === "opponent" ? rawLock : "none";
+  });
+
+  nextSnapshot.penalties = Number.isInteger(penalties) ? Math.max(0, Math.min(MAX_PENALTIES, penalties)) : 0;
+  return nextSnapshot;
+}
+
+function normalizeSyncPlayerScores(value: unknown, scoreCard: ScoreCardPreset): SyncPlayerScores {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([playerId]) => playerId)
+      .map(([playerId, snapshot]) => [playerId, normalizeScoreSnapshot(snapshot, scoreCard)]),
+  );
+}
+
+function promoteReadySnapshots(
+  scores: SyncPlayerScores,
+  payloads: SyncReadyPayload[],
+  scoreCard: ScoreCardPreset,
+  closedRows: RowColor[],
+) {
+  const nextScores = cloneSyncPlayerScores(scores);
+
+  payloads.forEach((payload) => {
+    const rows = applyGlobalClosedRows(rowsFromScoreSnapshot(scoreCard, payload.scoreSnapshot), closedRows);
+    nextScores[payload.playerId] = scoreSnapshotFromRows(rows, payload.scoreSnapshot.penalties);
+  });
+
+  return nextScores;
+}
+
+function removePlayerScore(scores: SyncPlayerScores, playerId: string) {
+  const nextScores = cloneSyncPlayerScores(scores);
+  delete nextScores[playerId];
+  return nextScores;
+}
+
 function applyGlobalClosedRows(rows: RowsState, closedRows: RowColor[]) {
   const nextRows = cloneRows(rows);
 
@@ -1088,7 +1241,7 @@ function getGameOverFromRowsAndPenalties(rows: RowsState, penalties: number, fal
   };
 }
 
-function normalizeReadyPayload(value: unknown): SyncReadyPayload | null {
+function normalizeReadyPayload(value: unknown, scoreCard: ScoreCardPreset): SyncReadyPayload | null {
   if (!value || typeof value !== "object") {
     return null;
   }
@@ -1104,6 +1257,7 @@ function normalizeReadyPayload(value: unknown): SyncReadyPayload | null {
     playerId: payload.playerId,
     closedRows: Array.isArray(payload.closedRows) ? uniqueRows(payload.closedRows.filter(isRowColor)) : [],
     reachedFourPenalties: payload.reachedFourPenalties === true,
+    scoreSnapshot: normalizeScoreSnapshot(payload.scoreSnapshot, scoreCard),
   };
 }
 
@@ -1206,6 +1360,7 @@ function App() {
   const [isAcceptingAnswer, setIsAcceptingAnswer] = useState(false);
   const [syncPenaltyPlayerIds, setSyncPenaltyPlayerIds] = useState<string[]>([]);
   const [syncToastMessage, setSyncToastMessage] = useState("");
+  const [syncPlayerScores, setSyncPlayerScores] = useState<SyncPlayerScores>({});
   const [gamePlayers, setGamePlayers] = useState<Player[]>(savedGame?.players ?? []);
   const [currentPlayerIndex, setCurrentPlayerIndex] = useState(savedGame?.currentPlayerIndex ?? 0);
   const [rows, setRows] = useState<RowsState>(savedGame?.rows ?? createEmptyRows);
@@ -1220,6 +1375,7 @@ function App() {
   const [syncHintsLockedOff, setSyncHintsLockedOff] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"rollUndo" | "exit" | "startOver" | null>(null);
   const [draggingPlayerId, setDraggingPlayerId] = useState<string | null>(null);
+  const [secretProgress, setSecretProgress] = useState(0);
   const [rollAnimationKey, setRollAnimationKey] = useState(0);
   const draftNameInputRef = useRef<HTMLInputElement>(null);
   const hostTransportRef = useRef<SyncHostTransport | null>(null);
@@ -1240,6 +1396,7 @@ function App() {
     selectedPlayerId,
     showHints,
     syncHintsLockedOff,
+    syncPlayerScores,
     gameScoreCardId,
     syncScoreCardId,
   });
@@ -1287,6 +1444,10 @@ function App() {
     mode === "local"
       ? gameOverReason !== "opponentPenalties" && (turn.history.length > 0 || undoStack.length > 0)
       : syncPhase === "turn" && !isLocalReady && turn.history.length > 0;
+  const canEnterSecretScorePassword =
+    isSyncMode &&
+    page === "play" &&
+    (syncPhase === "gameOver" || (syncPhase === "turn" && !isLocalReady && Boolean(turn.roll)));
 
   function syncLatestState(updates: Partial<LatestSyncState>) {
     latestRef.current = { ...latestRef.current, ...updates };
@@ -1337,6 +1498,10 @@ function App() {
 
     if ("syncHintsLockedOff" in patch && typeof patch.syncHintsLockedOff === "boolean") {
       latestUpdates.syncHintsLockedOff = patch.syncHintsLockedOff;
+    }
+
+    if ("syncPlayerScores" in patch && patch.syncPlayerScores) {
+      latestUpdates.syncPlayerScores = patch.syncPlayerScores;
     }
 
     if ("gameScoreCardId" in patch && typeof patch.gameScoreCardId === "number") {
@@ -1407,6 +1572,10 @@ function App() {
       setSyncHintsLockedOff(patch.syncHintsLockedOff);
     }
 
+    if ("syncPlayerScores" in patch && patch.syncPlayerScores) {
+      setSyncPlayerScores(patch.syncPlayerScores);
+    }
+
     if ("gameScoreCardId" in patch && typeof patch.gameScoreCardId === "number") {
       setGameScoreCardId(patch.gameScoreCardId);
     }
@@ -1431,6 +1600,10 @@ function App() {
     clearSyncToast();
   }
 
+  function resetSecretProgress() {
+    setSecretProgress(0);
+  }
+
   function showSyncToast(message: string) {
     clearSyncToast();
 
@@ -1453,6 +1626,69 @@ function App() {
   ) {
     setSyncPenaltyPlayerIds(penaltyPlayerIds);
     showSyncToast(formatSyncAdvanceToast(scoreCard, closedBy, penaltyPlayerIds, playersForNames));
+  }
+
+  function enterSecretDie(press: SecretDiePress) {
+    if (!canEnterSecretScorePassword) {
+      resetSecretProgress();
+      return;
+    }
+
+    const expected = SECRET_SCORE_PASSWORD[secretProgress];
+    const nextProgress = press === expected ? secretProgress + 1 : press === SECRET_SCORE_PASSWORD[0] ? 1 : 0;
+
+    if (nextProgress >= SECRET_SCORE_PASSWORD.length) {
+      resetSecretProgress();
+      setPage("secretScores");
+      return;
+    }
+
+    setSecretProgress(nextProgress);
+  }
+
+  function resetSecretOnPlayClick(event: ReactMouseEvent<HTMLDivElement>) {
+    const target = event.target;
+
+    if (target instanceof Element && target.closest("[data-secret-die]")) {
+      return;
+    }
+
+    resetSecretProgress();
+  }
+
+  function closeSecretScores() {
+    resetSecretProgress();
+    setPage("play");
+  }
+
+  function getVisibleScoreSnapshot(playerId: string) {
+    if (playerId === selectedPlayerId) {
+      return localReadyPayload?.scoreSnapshot ?? createScoreSnapshot(scoreCard, rows, penalties, turn);
+    }
+
+    const pending = syncReadyPayloads.find((payload) => payload.turnId === syncTurnId && payload.playerId === playerId);
+    return pending?.scoreSnapshot ?? syncPlayerScores[playerId] ?? createBlankScoreSnapshot();
+  }
+
+  function getSecretScoreEntries() {
+    const ownPlayer = selectedPlayerId ? gamePlayers.find((player) => player.id === selectedPlayerId) : null;
+    const entries = gamePlayers
+      .filter((player) => player.id !== selectedPlayerId)
+      .map((player) => ({
+        player,
+        snapshot: getVisibleScoreSnapshot(player.id),
+        self: false,
+      }));
+
+    if (ownPlayer) {
+      entries.push({
+        player: ownPlayer,
+        snapshot: getVisibleScoreSnapshot(ownPlayer.id),
+        self: true,
+      });
+    }
+
+    return entries;
   }
 
   useEffect(() => {
@@ -1541,6 +1777,7 @@ function App() {
       selectedPlayerId,
       showHints,
       syncHintsLockedOff,
+      syncPlayerScores,
       gameScoreCardId,
       syncScoreCardId,
     };
@@ -1558,6 +1795,7 @@ function App() {
     selectedPlayerId,
     showHints,
     syncHintsLockedOff,
+    syncPlayerScores,
     gameScoreCardId,
     syncScoreCardId,
   ]);
@@ -1663,6 +1901,7 @@ function App() {
       syncRole: null,
       syncHostPlayerId: null,
       syncHintsLockedOff: false,
+      syncPlayerScores: {},
       syncScoreCardId: null,
     });
     setMode("local");
@@ -1687,6 +1926,7 @@ function App() {
       syncReadyPayloads: [],
       syncPhase: "idle",
       syncHintsLockedOff: false,
+      syncPlayerScores: {},
       syncScoreCardId: null,
       gameScoreCardId: game.scoreCardId,
       selectedPlayerId: nextSelectedPlayerId,
@@ -1709,6 +1949,8 @@ function App() {
       gameOver: false,
       gameOverReason: null,
       undoStack: [],
+      syncReadyPayloads: [],
+      syncPlayerScores: {},
       rollAnimationKey: 0,
     });
     clearSyncAdvanceFeedback();
@@ -1725,6 +1967,7 @@ function App() {
       syncHostPlayerId: null,
       syncReadyPayloads: [],
       syncHintsLockedOff: false,
+      syncPlayerScores: {},
       syncScoreCardId: null,
     });
     setSyncRole(null);
@@ -1732,6 +1975,7 @@ function App() {
     setSyncHostPlayerId(null);
     setSyncReadyPayloads([]);
     setSyncHintsLockedOff(false);
+    setSyncPlayerScores({});
     setSyncScoreCardId(null);
     setSyncQrText("");
     setSyncAnswerText("");
@@ -1987,8 +2231,11 @@ function App() {
     }
 
     if (message.type === "readyStatus") {
+      const latestScoreCard = getScoreCard(latestRef.current.gameScoreCardId);
       const payloads = Array.isArray(message.payloads)
-        ? message.payloads.map(normalizeReadyPayload).filter((payload): payload is SyncReadyPayload => Boolean(payload))
+        ? message.payloads
+            .map((payload) => normalizeReadyPayload(payload, latestScoreCard))
+            .filter((payload): payload is SyncReadyPayload => Boolean(payload))
         : [];
 
       syncLatestState({ syncReadyPayloads: payloads, syncPhase: "turn" });
@@ -2018,9 +2265,11 @@ function App() {
       }
 
       const nextPlayers = normalizePlayers(message.players);
+      const nextPlayerScores = removePlayerScore(latestRef.current.syncPlayerScores, playerId);
       if (nextPlayers.length > 0) {
-        syncLatestState({ gamePlayers: nextPlayers });
-        setGamePlayers(nextPlayers);
+        applyPlayState({ gamePlayers: nextPlayers, syncPlayerScores: nextPlayerScores });
+      } else {
+        applyPlayState({ syncPlayerScores: nextPlayerScores });
       }
 
       if (message.discardTurn === true) {
@@ -2082,6 +2331,7 @@ function App() {
       syncTurnId: turnId,
       syncPhase: "turn",
       syncReadyPayloads: [],
+      syncPlayerScores: {},
       showHints: nextShowHints,
       syncHintsLockedOff: nextHintsLockedOff,
       syncScoreCardId: nextScoreCardId,
@@ -2114,6 +2364,7 @@ function App() {
       syncTurnId: nextTurnId(),
       syncPhase: nextPhase,
       syncReadyPayloads: [],
+      syncPlayerScores: {},
       syncHintsLockedOff: nextHintsLockedOff,
       syncScoreCardId: nextScoreCardId,
       gameScoreCardId: nextScoreCardId,
@@ -2221,7 +2472,7 @@ function App() {
   }
 
   function handleSyncReadyMessage(value: unknown) {
-    const payload = normalizeReadyPayload(value);
+    const payload = normalizeReadyPayload(value, getScoreCard(latestRef.current.gameScoreCardId));
 
     if (!payload || payload.turnId !== latestRef.current.syncTurnId) {
       return;
@@ -2238,7 +2489,7 @@ function App() {
       return;
     }
 
-    const payload = createReadyPayload(scoreCard, syncTurnId, selectedPlayerId, penalties, turn);
+    const payload = createReadyPayload(scoreCard, syncTurnId, selectedPlayerId, rows, penalties, turn);
 
     if (isHost) {
       setHostReadyPayloads([
@@ -2284,6 +2535,11 @@ function App() {
     const nextGamePlayers = nextPlayers.length > 0 ? nextPlayers : latest.gamePlayers;
     const nextCurrentPlayerIndex = Number.isInteger(nextIndex) ? nextIndex : 0;
     const nextEmptyTurn = createEmptyTurn();
+    const messagePlayerScores = normalizeSyncPlayerScores(message.syncPlayerScores, latestScoreCard);
+    const nextPlayerScores =
+      Object.keys(messagePlayerScores).length > 0
+        ? messagePlayerScores
+        : promoteReadySnapshots(latest.syncPlayerScores, latest.syncReadyPayloads, latestScoreCard, closedRows);
 
     applyPlayState({
       rows: withGlobalClosures,
@@ -2295,6 +2551,7 @@ function App() {
       gameOverReason: localReason,
       syncTurnId: nextTurn,
       syncReadyPayloads: [],
+      syncPlayerScores: nextPlayerScores,
       syncPhase: nextGameOver ? "gameOver" : "turn",
       rollAnimationKey: 0,
     });
@@ -2320,6 +2577,7 @@ function App() {
     const nextIndex = nextGameOver ? latest.currentPlayerIndex : (latest.currentPlayerIndex + 1) % latest.gamePlayers.length;
     const nextTurn = nextTurnId();
     const nextEmptyTurn = createEmptyTurn();
+    const nextPlayerScores = promoteReadySnapshots(latest.syncPlayerScores, activePayloads, latestScoreCard, closedRows);
 
     applyPlayState({
       rows: withGlobalClosures,
@@ -2330,6 +2588,7 @@ function App() {
       gameOverReason: nextReason,
       syncTurnId: nextTurn,
       syncReadyPayloads: [],
+      syncPlayerScores: nextPlayerScores,
       syncPhase: nextGameOver ? "gameOver" : "turn",
       rollAnimationKey: 0,
     });
@@ -2344,6 +2603,7 @@ function App() {
       nextTurnId: nextTurn,
       penaltyPlayerIds,
       players: latest.gamePlayers,
+      syncPlayerScores: nextPlayerScores,
       turnId: latest.syncTurnId,
     });
   }
@@ -2396,6 +2656,7 @@ function App() {
     applyPlayState({
       gamePlayers: nextPlayers,
       currentPlayerIndex: nextIndex,
+      syncPlayerScores: removePlayerScore(latest.syncPlayerScores, playerId),
     });
 
     if (currentPlayerRemoved) {
@@ -2428,6 +2689,7 @@ function App() {
       currentPlayerIndex: 0,
       syncReadyPayloads: [],
       syncPhase: "idle",
+      syncPlayerScores: {},
       gameOver: false,
       gameOverReason: null,
       undoStack: [],
@@ -2606,6 +2868,7 @@ function App() {
       gameOverReason: null,
       undoStack: [],
       syncHintsLockedOff: false,
+      syncPlayerScores: {},
       syncScoreCardId: null,
       gameScoreCardId: scoreCardId,
       rollAnimationKey: 0,
@@ -3145,7 +3408,7 @@ function App() {
       ) : null}
 
       {page === "play" && currentPlayer ? (
-        <div className="page-stack">
+        <div className="page-stack" onClickCapture={resetSecretOnPlayClick}>
           <section className="section-panel play-panel">
             <div className="top-actions">
               <button className="icon-action" type="button" onClick={exitToHome} aria-label="Exit">
@@ -3200,7 +3463,9 @@ function App() {
                   ? isUserTurn && !gameOver && !turn.roll && syncPhase === "turn"
                   : isUserTurn && !gameOver && !turn.roll
               }
+              secretEnabled={canEnterSecretScorePassword}
               pale={!isUserTurn || isLocalReady}
+              onSecretPress={enterSecretDie}
               onRoll={handleRollDice}
             />
 
@@ -3336,6 +3601,33 @@ function App() {
               {syncToastMessage}
             </div>
           ) : null}
+        </div>
+      ) : null}
+
+      {page === "secretScores" ? (
+        <div className="page-stack secret-score-page">
+          <section className="section-panel compact-panel">
+            <div className="top-actions">
+              <button className="icon-action" type="button" onClick={closeSecretScores} aria-label="Back">
+                <X size={19} />
+              </button>
+              <h1>Scores</h1>
+            </div>
+          </section>
+
+          {getSecretScoreEntries().map((entry) => (
+            <section className="section-panel secret-score-entry" key={entry.player.id}>
+              <div className="section-heading">
+                <h1>{entry.player.name}</h1>
+                {entry.self ? <Star size={18} fill="currentColor" aria-label="You" /> : null}
+              </div>
+              <ReadOnlyScoreCard
+                label={`${entry.player.name} score card`}
+                scoreCard={scoreCard}
+                snapshot={entry.snapshot}
+              />
+            </section>
+          ))}
         </div>
       ) : null}
 
@@ -3708,56 +4000,85 @@ function QrScanner({
 
 function DiceGrid({
   enabled,
+  onSecretPress,
   onRoll,
   pale,
   roll,
   rollAnimationKey,
   rows,
   scoreCard,
+  secretEnabled = false,
 }: {
   enabled: boolean;
+  onSecretPress?: (press: SecretDiePress) => void;
   onRoll: () => void;
   pale: boolean;
   roll: DiceRoll | null;
   rollAnimationKey: number;
   rows: RowsState;
   scoreCard: ScoreCardPreset;
+  secretEnabled?: boolean;
 }) {
   return (
-    <button className={pale ? "dice-grid pale" : "dice-grid"} type="button" onClick={onRoll} disabled={!enabled} aria-label="Roll dice">
+    <div
+      className={[pale ? "dice-grid pale" : "dice-grid", enabled ? "enabled" : ""].filter(Boolean).join(" ")}
+      onClick={() => {
+        if (enabled) {
+          onRoll();
+        }
+      }}
+      onKeyDown={(event) => {
+        if (enabled && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onRoll();
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-disabled={!enabled && !secretEnabled}
+      aria-label="Roll dice"
+    >
       {DICE_LAYOUT.map((die) => {
         if (isRowColor(die.key) && !isDieAvailable(die.key, rows, scoreCard)) {
           return null;
         }
 
         const value = roll ? roll[die.key as keyof DiceRoll] ?? null : null;
+        const secretPress: SecretDiePress | null =
+          secretEnabled && die.key === "whiteA" ? "top" : secretEnabled && die.key === "whiteB" ? "bottom" : null;
 
         return (
           <Die
             color={die.color}
             column={die.column}
             key={die.key}
+            onSecretPress={onSecretPress}
             row={die.row}
+            secretPress={secretPress}
             value={typeof value === "number" ? value : null}
             rollAnimationKey={rollAnimationKey}
           />
         );
       })}
-    </button>
+    </div>
   );
 }
 
 function Die({
   color,
   column,
+  onSecretPress,
   row,
   rollAnimationKey,
+  secretPress,
   value,
 }: {
   color: string;
   column: number;
+  onSecretPress?: (press: SecretDiePress) => void;
   row: number;
   rollAnimationKey: number;
+  secretPress: SecretDiePress | null;
   value: number | null;
 }) {
   const pipPositions: Record<number, number[]> = {
@@ -3775,6 +4096,15 @@ function Die({
       className={value ? `die ${color} rolled` : `die ${color} idle`}
       style={{ gridColumn: column, gridRow: row }}
       key={`${color}-${rollAnimationKey}-${value ?? "idle"}`}
+      data-secret-die={secretPress ?? undefined}
+      onClick={(event) => {
+        if (!secretPress) {
+          return;
+        }
+
+        event.stopPropagation();
+        onSecretPress?.(secretPress);
+      }}
     >
       {Array.from({ length: 9 }, (_, index) => (
         <span className={positions.includes(index) ? `pip p${index} visible` : `pip p${index}`} key={index} />
@@ -3947,6 +4277,68 @@ function ScoreTotals({
       <span className="total-box penalty">{getPenaltyCount(penalties, turn) * PENALTY_POINTS}</span>
       <span className="operator">=</span>
       <strong className="grand-total">{totalScore}</strong>
+    </div>
+  );
+}
+
+function ReadOnlyScoreCard({
+  label,
+  scoreCard,
+  snapshot,
+}: {
+  label: string;
+  scoreCard: ScoreCardPreset;
+  snapshot: ScoreSnapshot;
+}) {
+  const rows = rowsFromScoreSnapshot(scoreCard, snapshot);
+  const emptyTurn = createEmptyTurn();
+  const emptyLegalKeys = new Set<string>();
+  const emptyLegalRoles = new Map<string, Set<MarkRole>>();
+  const totalScore = getTotalScore(scoreCard, rows, snapshot.penalties, emptyTurn);
+
+  return (
+    <div className="score-card readonly-score-card" aria-label={label}>
+      <div className="score-rows">
+        <span className="score-final-divider" aria-hidden="true" />
+        {ROW_COLORS.map((row) => (
+          <ScoreRow
+            key={row}
+            row={row}
+            scoreCard={scoreCard}
+            rows={rows}
+            turn={emptyTurn}
+            legalMarkKeys={emptyLegalKeys}
+            legalMarkRoles={emptyLegalRoles}
+            showHints={false}
+            canLock={false}
+            gameOver
+            preview
+            onSelectMark={() => undefined}
+            onStageOpponentLock={() => undefined}
+          />
+        ))}
+      </div>
+
+      <div className="penalty-row">
+        <div className="penalty-left">
+          <span className="penalty-button readonly">-5</span>
+          <div className="penalty-boxes" aria-label="Penalties">
+            {Array.from({ length: MAX_PENALTIES }, (_, index) => (
+              <span className={index < snapshot.penalties ? "penalty-box selected" : "penalty-box"} key={index} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="score-guide" aria-label="Scoring guide">
+        {SCORE_VALUES.slice(1).map((score, index) => (
+          <span key={score}>
+            {index + 1}x {score}
+          </span>
+        ))}
+      </div>
+
+      <ScoreTotals scoreCard={scoreCard} rows={rows} penalties={snapshot.penalties} turn={emptyTurn} totalScore={totalScore} />
     </div>
   );
 }

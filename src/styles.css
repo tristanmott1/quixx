@@ -165,6 +165,7 @@ button:focus-visible {
 }
 
 .section-heading h1,
+.top-actions h1,
 .turn-title h1 {
   margin: 0;
   color: var(--ink);
@@ -525,11 +526,12 @@ button:focus-visible {
   touch-action: manipulation;
 }
 
-.dice-grid:disabled {
+.dice-grid[aria-disabled="true"] {
+  cursor: default;
   opacity: 1;
 }
 
-.dice-grid:not(:disabled) {
+.dice-grid.enabled {
   box-shadow: 0 0 0 3px rgba(24, 24, 27, 0.08);
 }
 
@@ -971,6 +973,23 @@ button:focus-visible {
   background: #fee2e2;
 }
 
+.penalty-button.readonly {
+  display: inline-grid;
+  place-items: center;
+}
+
+.secret-score-page {
+  padding-bottom: 20px;
+}
+
+.secret-score-entry {
+  gap: 10px;
+}
+
+.secret-score-entry .section-heading {
+  align-items: center;
+}
+
 .opponent-penalty-button {
   display: inline-flex;
   align-items: center;
@@ -1235,6 +1254,7 @@ button:focus-visible {
   }
 
   .section-heading h1,
+  .top-actions h1,
   .turn-title h1 {
     font-size: 1.32rem;
   }

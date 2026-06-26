@@ -159,6 +159,17 @@ async function runSourceChecks() {
   assert(!appSource.includes("function getLegalMarkKeys"), "Duplicate legal-key helper is removed.");
   assert(!appSource.includes("function getLegalMarkRoles"), "Duplicate legal-role helper is removed.");
   assert(appSource.includes("function applyPlayState"), "Repeated play-state commits use a small helper.");
+  assert(appSource.includes('const SECRET_SCORE_PASSWORD'), "Secret score password is stored in source.");
+  assert(appSource.includes('"top", "bottom", "top", "top", "bottom", "bottom"'), "Secret score password matches the agreed sequence.");
+  assert(appSource.includes('type Page = "home" | "picker" | "play" | "secretScores"'), "Secret scores use a real app page.");
+  assert(appSource.includes("syncPlayerScores"), "Sync mode stores finalized per-player score snapshots.");
+  assert(appSource.includes("scoreSnapshot"), "Ready payloads carry player score snapshots.");
+  assert(appSource.includes("promoteReadySnapshots"), "Automatic sync advance promotes Ready snapshots.");
+  assert(appSource.includes("data-secret-die"), "White dice carry hidden secret input hooks.");
+  assert(
+    appSource.includes('className={value ? `die ${color} rolled` : `die ${color} idle`}'),
+    "Secret input does not add visible dice-state classes.",
+  );
 }
 
 function rowsState() {
@@ -443,9 +454,26 @@ async function runSyncHostChecks(page) {
   assert((await page.getByRole("button", { name: "Show legal options" }).count()) === 1, "Unlock leaves personal hints off and usable.");
   assert((await page.getByRole("button", { name: "Opponent reached four penalties" }).count()) === 0, "Sync play hides opponent 4x control.");
   assert(await page.getByRole("button", { name: "Ready" }).isDisabled(), "Sync Ready starts disabled before rolling.");
+  assert((await page.locator("[data-secret-die]").count()) === 0, "Secret score input is unavailable before a synced roll.");
 
   await page.getByRole("button", { name: "Roll dice" }).click();
   assert(await page.getByRole("button", { name: "Ready" }).isDisabled(), "Sync Ready stays disabled until a mark or penalty.");
+  const secretTopDie = page.locator('[data-secret-die="top"]');
+  const secretBottomDie = page.locator('[data-secret-die="bottom"]');
+  assert((await secretTopDie.count()) === 1, "Top white die becomes the hidden secret input after rolling.");
+  assert((await secretBottomDie.count()) === 1, "Bottom white die becomes the hidden secret input after rolling.");
+  await secretTopDie.click();
+  await secretBottomDie.click();
+  await secretBottomDie.click();
+  assert((await page.locator(".secret-score-page").count()) === 0, "Wrong secret sequence does not open the score page.");
+  for (const die of [secretTopDie, secretBottomDie, secretTopDie, secretTopDie, secretBottomDie, secretBottomDie]) {
+    await die.click();
+  }
+  assert((await page.locator(".secret-score-page").count()) === 1, "Correct secret sequence opens the score page.");
+  assert((await page.locator(".secret-score-entry", { hasText: "Alice" }).count()) === 1, "Secret score page shows the local player.");
+  assert((await page.locator(".secret-score-entry .grand-total").last().textContent()) === "0", "Missing score snapshots render as zero.");
+  await page.screenshot({ path: outputPath("sync-secret-scores-mobile.png"), fullPage: true });
+  await page.getByRole("button", { name: "Back" }).click();
   await page.locator("button.score-tile.legal").first().click();
   assert(!(await page.getByRole("button", { name: "Ready" }).isDisabled()), "Sync Ready enables after a valid mark.");
   await page.getByRole("button", { name: "Ready" }).click();
@@ -466,6 +494,25 @@ async function runSyncHostChecks(page) {
   await page.screenshot({ path: outputPath("sync-returned-lobby-mobile.png"), fullPage: true });
   await page.getByRole("button", { name: "Start" }).click();
   assert((await page.locator(".dice-grid").count()) === 1, "Sync host can start again from the returned lobby.");
+  for (let index = 0; index < 4; index += 1) {
+    await page.getByRole("button", { name: "Roll dice" }).click();
+    await page.getByRole("button", { name: "Penalty" }).click();
+    await page.getByRole("button", { name: "Ready" }).click();
+  }
+  assert(await page.getByRole("button", { name: "Ready" }).isDisabled(), "Sync game over disables Ready.");
+  for (const die of [
+    page.locator('[data-secret-die="top"]'),
+    page.locator('[data-secret-die="bottom"]'),
+    page.locator('[data-secret-die="top"]'),
+    page.locator('[data-secret-die="top"]'),
+    page.locator('[data-secret-die="bottom"]'),
+    page.locator('[data-secret-die="bottom"]'),
+  ]) {
+    await die.click();
+  }
+  assert((await page.locator(".secret-score-page").count()) === 1, "Secret score page opens during sync game over.");
+  assert((await page.locator(".secret-score-entry .penalty-box.selected").count()) === 4, "Secret score page shows game-over penalties.");
+  await page.getByRole("button", { name: "Back" }).click();
   await page.getByRole("button", { name: "Exit" }).click();
   assert((await page.getByRole("dialog", { name: "Exit?" }).count()) === 1, "Sync host Exit asks for confirmation.");
   await page.getByRole("button", { name: "Cancel" }).click();

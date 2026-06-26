@@ -9,7 +9,7 @@ Build a static, installable PWA for tracking a Qwixx game from one player's pers
 The app supports two play modes:
 
 - Local mode: one device tracks one player's score card. Opponent rolls, opponent row closures, and opponent penalty game-over events are entered manually by the user.
-- Sync mode: nearby devices sync shared game flow over an offline local network using WebRTC data channels and QR-code signaling. Each device tracks only that player's own score card, while shared turn order, dice rolls, row closures, player exits, and game-over state are synchronized.
+- Sync mode: nearby devices sync shared game flow over an offline local network using WebRTC data channels and QR-code signaling. Each device tracks that player's own score card, while shared turn order, dice rolls, row closures, player exits, game-over state, and latest ready-submitted player score snapshots are synchronized.
 
 Sync mode is designed for no-internet situations, such as a hike or cabin game:
 
@@ -418,6 +418,7 @@ The host is authoritative for shared game state:
 - Player ready status.
 - Player exits and host removals.
 - Host-only start over.
+- Latest ready-submitted score snapshot for each active player.
 
 Each player device is authoritative only for that player's private score card actions:
 
@@ -425,8 +426,43 @@ Each player device is authoritative only for that player's private score card ac
 - Local penalty selection.
 - Local score total.
 - The player's own Ready payload for the current turn.
+- The player's own score snapshot that is sent when Ready is pressed.
 
-Sync mode should send small events instead of syncing entire private score cards.
+Sync mode should keep live score-card editing private until the player presses Ready.
+
+After a player presses Ready, that player sends a compact full score snapshot for their own score card:
+
+- `playerId`.
+- The current `turnId`.
+- Selected numbers by row.
+- Row lock ownership by row.
+- Penalty count.
+
+The snapshot is authoritative for that player's current-turn Ready state, but it should not permanently replace that player's finalized score state until the turn advances.
+
+Devices maintain two simple score sources:
+
+- `syncPlayerScores`: finalized score snapshots keyed by player id.
+- `syncReadyPayloads`: current-turn pending Ready payloads, each including that player's pending score snapshot.
+
+Snapshot rules:
+
+- Missing finalized entries render as a blank score card with 0 penalties.
+- The secret score page shows a current-turn pending Ready snapshot when one exists for that player and turn.
+- Otherwise, the secret score page shows that player's finalized `syncPlayerScores` snapshot.
+- When all active players are Ready and the turn advances, pending Ready snapshots are promoted into `syncPlayerScores`.
+- Promotion applies the completed turn's global row closures to every promoted snapshot, so non-closing players show opponent locks after advance.
+- If the current turn is discarded before automatic advance, pending Ready snapshots are cleared and the secret page falls back to finalized `syncPlayerScores`.
+- Game start and host start over reset both finalized and pending score snapshots.
+- Player removal/session exit removes that player's finalized and pending snapshots because the secret score page only shows active players.
+- Score snapshots are runtime sync-session state and are not persisted to localStorage.
+
+Score snapshots intentionally reveal current-turn choices only after the owning player has pressed Ready:
+
+- If Bob has not pressed Ready on the current turn, other devices show Bob's previous snapshot.
+- If Bob has pressed Ready on the current turn, other devices show Bob's current-turn selections and penalty state immediately.
+- If Alice closes a row and presses Ready, Alice's snapshot shows Alice's final tile and owned lock immediately.
+- That row closure is still not enforced globally until all active players are Ready and the turn advances automatically.
 
 Shared event messages should include a `turnId` whenever they apply to a turn. Devices must ignore stale turn-scoped messages from earlier turns.
 
@@ -444,7 +480,7 @@ Host-to-player events include:
 - Lobby state.
 - Game start.
 - Dice roll result.
-- Ready status summary.
+- Ready status summary with the latest ready-submitted score snapshots.
 - Automatic advance result.
 - Player removal.
 - Host start over.
@@ -454,7 +490,7 @@ Player-to-host events include:
 
 - Join metadata after the QR handshake completes.
 - Current-player roll request.
-- Ready payload.
+- Ready payload with shared consequences and that player's score snapshot.
 - Voluntary exit.
 
 Sync score-card requirements:
@@ -463,6 +499,10 @@ Sync score-card requirements:
 - Game start should include the host-selected score-card id.
 - Host start over should include the host-selected score-card id.
 - When the host confirms a score-card change in the lobby, the host broadcasts the updated lobby state.
+- Game start and host start over should reset `syncPlayerScores` for every device.
+- Ready status should include all active ready payloads for the current turn so every device can update score snapshots as each player becomes Ready.
+- Automatic advance should promote current-turn Ready snapshots into finalized `syncPlayerScores`, then clear current-turn Ready state.
+- Turn discard should clear current-turn Ready snapshots without promoting them.
 - Joined players should update their read-only sync card preview immediately when the lobby state changes.
 - A joiner should not persist the host-selected score-card id as that joiner's personal score-card choice.
 
@@ -722,6 +762,64 @@ Synced play player rows should show, from left to right:
 - Star if this is the local user's own row.
 - Remove icon if the host is viewing another player.
 - Nothing at the end if a non-host is viewing another player.
+
+### Secret Sync Score Page
+
+Sync mode includes a hidden score-inspection page.
+
+This page is intentionally not discoverable through visible UI:
+
+- No visible button, label, hint, animation, toast, or status message should reveal it.
+- Entering the password should not change dice appearance.
+- Pressing the password dice should not show pressed, selected, or active visual states beyond normal button behavior already present elsewhere.
+
+The password is stored in the repository as a small constant:
+
+- `top`
+- `bottom`
+- `top`
+- `top`
+- `bottom`
+- `bottom`
+
+`top` and `bottom` refer to the two white dice in the dice grid.
+
+The password can be entered only from sync play or sync game over:
+
+- In sync `turn`, the local player must not have pressed Ready.
+- In sync `turn`, if it is the local player's turn, the dice must already be rolled before the password can be entered.
+- In sync `turn`, if it is not the local player's turn, the password can be entered after the synced roll arrives.
+- In sync `gameOver`, Ready is no longer possible, so the password can always be entered from the white dice.
+- The password is not available in local mode, sync lobby, QR scan pages, picker pages, or initial Home setup.
+
+Password input rules:
+
+- A correct `top` or `bottom` press advances the hidden sequence.
+- Pressing any other app button or score-card control resets the sequence.
+- Pressing the wrong white die resets the sequence.
+- Pressing `top` after a wrong or partial sequence should immediately start a fresh sequence from the first password step.
+- Navigating away from sync play/game over resets the sequence.
+- Opening the secret page resets the sequence.
+
+The secret page layout should stay simple and app-native:
+
+- It is a separate page/state from the normal Play page.
+- It has a minimal top bar with an Exit/Back button that returns to the normal sync Play page.
+- Its content is vertically scrollable.
+- It shows active opponents first, in current player order.
+- It shows the local user's own score card at the bottom for comparison.
+- It does not show removed or exited players.
+- Each player section shows the player's name, score-card rows, penalty markers, scoring guide/totals, and total score.
+- If no Ready snapshot exists for a player, that player's section renders a blank score card with 0 penalties.
+- It uses the same selected score-card preset and shared score-card components as the Play page.
+
+The secret page reads from pending Ready snapshots, finalized `syncPlayerScores`, and the local player's own current state:
+
+- Opponent sections use that opponent's current-turn pending Ready snapshot when present.
+- Otherwise, opponent sections use the latest finalized `syncPlayerScores` snapshot.
+- The local user's own section may use the current local rows, penalties, and staged turn state so it matches what the user already sees on the Play page.
+- If the local user has pressed Ready, the local section should match the local user's submitted snapshot.
+- No score-card controls on the secret page are interactive.
 
 ## Score Card Layout
 
@@ -1039,20 +1137,38 @@ When a player presses Ready:
 - The player's controls lock until the next turn.
 - Undo is disabled until the next turn.
 - The player sends a Ready payload to the host.
+- The player includes a compact full score snapshot showing the local score card after applying that Ready action.
 
-The Ready payload contains only shared consequences:
+The Ready payload contains shared consequences plus the player's public score snapshot:
 
 - `turnId`.
 - `playerId`.
 - Rows closed by that player on this turn.
 - Whether that player reached 4 penalties on this turn.
+- `scoreSnapshot`.
 
-The Ready payload does not include the player's full private score card.
+The `scoreSnapshot` contains the player's score card after applying that Ready action:
+
+- Selected numbers by row.
+- Row lock ownership by row.
+- Penalty count.
+
+The `scoreSnapshot` does not contain hidden UI state, undo history, dice history, hint state, or any data for other players.
+
+When the host receives a Ready payload:
+
+- The host validates the payload's `turnId`.
+- The host stores that payload as a current-turn pending Ready payload.
+- The host broadcasts Ready status with all active Ready payloads so every device can show the same pending ready-submitted snapshots.
+- If removing a player or discarding a turn removes that player's Ready payload, the host must also ensure the removed pending snapshot is no longer treated as that player's current-turn public state.
 
 When synced advance applies shared consequences:
 
 - The advance result includes `closedBy: { playerId, row }[]`.
 - The advance result includes `penaltyPlayerIds: string[]`.
+- The advance result should promote the completed turn's Ready snapshots into finalized `syncPlayerScores`.
+- The advance result should clear current-turn Ready payloads after promotion.
+- If implementation keeps advance result as the authoritative final turn message, it may include the latest finalized `syncPlayerScores` map for robustness, but the source of truth for current-turn visibility should remain the per-player Ready snapshots.
 - `closedBy` identifies which players closed which rows.
 - `penaltyPlayerIds` identifies which players reached 4 penalties.
 - Everyone sees a toast after advance for row closures and 4-penalty events.
@@ -1092,6 +1208,95 @@ Automatic advance result requirements:
 - The host must build 4-penalty metadata from the active Ready payloads for the completed turn.
 - The host must apply and broadcast the same row-closure and 4-penalty metadata.
 - Joiners must apply the metadata from the host rather than recomputing shared results from private assumptions.
+
+## Secret Sync Score Page Implementation Plan
+
+The secret score page should be implemented as a small extension of existing sync play state, not as a separate game engine.
+
+State additions:
+
+- Add a page/state value for the secret score page, for example `Page = "home" | "picker" | "play" | "secretScores"`.
+- Add `syncPlayerScores`, keyed by player id, storing finalized score snapshots.
+- Keep current-turn pending snapshots inside `syncReadyPayloads` by adding `scoreSnapshot` to `SyncReadyPayload`.
+- Add a tiny password-progress state for the hidden white-dice sequence.
+
+Snapshot type:
+
+- `selectedByRow`: selected tile numbers for each row.
+- `locksByRow`: row lock state for each row.
+- `penalties`: penalty count.
+
+Snapshot helpers:
+
+- `createBlankScoreSnapshot(scoreCard)` returns empty rows and 0 penalties.
+- `createScoreSnapshot(scoreCard, rows, penalties, turn)` returns the local score card after applying the current staged Ready action.
+- `rowsFromScoreSnapshot(scoreCard, snapshot)` converts a snapshot into the existing row state shape used by the shared score-card renderer.
+- `normalizeScoreSnapshot(value, scoreCard)` validates incoming data and drops impossible row numbers, unknown lock values, and invalid penalty counts.
+- `getVisibleScoreSnapshot(playerId)` returns the current-turn Ready snapshot for that player when present, otherwise finalized `syncPlayerScores[playerId]`, otherwise a blank snapshot.
+
+Ready payload changes:
+
+- Extend `SyncReadyPayload` with `scoreSnapshot`.
+- `readySyncTurn` should build the snapshot from the local rows, penalties, and current staged turn at the same time it builds row-closure and 4-penalty metadata.
+- `normalizeReadyPayload` must require a valid snapshot or normalize to a blank safe snapshot only when supporting older runtime messages.
+- Host Ready handling stores payloads in `syncReadyPayloads` and broadcasts Ready status.
+- Ready status broadcasts all active pending Ready payloads, including snapshots.
+- Automatic advance promotes the completed Ready snapshots into `syncPlayerScores`.
+- Promotion applies any newly global closed rows to every promoted snapshot.
+- Turn discard clears pending Ready payload snapshots without promoting them.
+
+Sync message behavior:
+
+- `gameStart` and `hostStartOver` reset finalized and pending score snapshots.
+- `readyStatus` carries pending Ready payloads with snapshots.
+- `advanceResult` may carry finalized `syncPlayerScores` for robustness, but all devices can also derive the same finalized map from the completed Ready payloads.
+- `playerRemoved` removes that player's finalized and pending snapshots.
+- `sessionEnded` clears finalized and pending snapshots.
+- Joiners who connect mid-lobby receive no score snapshots because the game has not started.
+
+Hidden password handling:
+
+- Store the password in source as a constant, for example `SECRET_SCORE_PASSWORD = ["top", "bottom", "top", "top", "bottom", "bottom"]`.
+- Add invisible handlers to the two white dice only.
+- The dice components must not receive any visible class or state because of password input.
+- `canEnterSecretScorePassword` should be true only when:
+  - mode is sync, and
+  - page is play, and
+  - phase is `turn` or `gameOver`, and
+  - local player has not pressed Ready when phase is `turn`, and
+  - the synced roll exists when phase is `turn`, and
+  - if local player is current player during `turn`, the roll has already happened.
+- A wrong white-die press resets the progress, except `top` immediately starts progress at step 1.
+- Any normal play-page button or score-card action resets the progress.
+- Opening the secret page resets the progress.
+- Exiting the secret page returns to the normal sync Play page and resets the progress.
+
+Secret page rendering:
+
+- Reuse the existing score-card row, penalty, scoring guide, and totals UI.
+- Render all active opponents first, in current player order.
+- Render the local user's own score card last.
+- Each player block shows the player's name, rows, penalties, scoring totals, and total score.
+- All score-card controls are disabled/read-only.
+- A player with no finalized or pending snapshot shows a blank score card with 0 penalties.
+- The content area is vertically scrollable.
+- The top bar has only a minimal Exit/Back control returning to sync Play.
+
+Testing requirements:
+
+- Verify the secret password constant exists in source.
+- Verify the password does not add visible dice-state classes or text.
+- Verify the secret page is unreachable in local mode.
+- Verify the secret page is unreachable in sync turn before a roll.
+- Verify a wrong sequence resets and `top` can restart the sequence.
+- Verify the correct sequence opens the secret page before Ready.
+- Verify the correct sequence opens the secret page during sync game over.
+- Verify active opponents render before the local user's own card.
+- Verify missing snapshots render blank with 0 penalties.
+- Verify a Ready payload snapshot appears on other devices before automatic advance.
+- Verify discarded turns remove pending snapshots.
+- Verify automatic advance promotes Ready snapshots into finalized scores.
+- Verify player removal removes that player's secret-page card.
 
 ## Undo Button
 
@@ -1275,6 +1480,12 @@ Persist locally for sync mode:
 - The local player's unready current-turn undo history.
 
 Do not persist a joined host's selected score-card id as the joiner's personal selected score-card id.
+
+Do not persist sync score snapshots:
+
+- `syncPlayerScores` is runtime-only.
+- Pending Ready snapshots are runtime-only.
+- Secret score-page state is runtime-only.
 
 Do not rely on local persistence to recover a live sync session:
 
@@ -1511,7 +1722,9 @@ Sync joiner behavior:
 Sync play behavior:
 
 - Everyone uses the same host-selected score-card layout.
-- Ready payloads continue to send shared consequences, not full private score cards.
+- Ready payloads send shared consequences plus that player's current score snapshot.
+- Pending Ready snapshots power the secret score page before automatic advance.
+- Automatic advance promotes completed Ready snapshots into finalized `syncPlayerScores`.
 - Row closure payloads identify closed rows, not closed colors.
 - Advance result applies closed rows and derives removed dice from those rows' lock colors.
 
