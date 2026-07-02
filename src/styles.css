@@ -476,22 +476,10 @@ button:focus-visible {
   background: var(--surface-soft);
 }
 
-.qr-panel-heading {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-}
-
 .qr-panel span {
   color: var(--muted);
   font-size: 0.86rem;
   font-weight: 900;
-}
-
-.qr-copy-button {
-  min-height: 34px;
 }
 
 .qr-code,
@@ -1291,32 +1279,6 @@ button:focus-visible {
   min-height: 44px;
 }
 
-.copy-code-modal textarea,
-.scanner-paste textarea {
-  width: 100%;
-  min-height: 58px;
-  padding: 9px 10px;
-  resize: vertical;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.9rem;
-  font-weight: 750;
-  line-height: 1.25;
-}
-
-.copy-code-modal textarea {
-  min-height: 116px;
-  font-size: 0.78rem;
-  line-height: 1.35;
-}
-
-.copy-code-modal > .secondary {
-  min-height: 44px;
-}
-
 .scanner-modal {
   display: grid;
   gap: 12px;
@@ -1326,17 +1288,6 @@ button:focus-visible {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: 0 18px 48px rgba(24, 24, 27, 0.18);
-}
-
-.scanner-paste {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px;
-  gap: 8px;
-  align-items: stretch;
-}
-
-.scanner-paste .icon-button {
-  min-height: 58px;
 }
 
 .scanner-frame {

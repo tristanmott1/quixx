@@ -3,7 +3,6 @@ import {
   ArrowRight,
   Check,
   CircleDashed,
-  Copy,
   Crown,
   Eye,
   EyeOff,
@@ -61,14 +60,7 @@ import {
   type ScoreCardPreset,
   type ScoreCardType,
 } from "./scoreCards";
-import {
-  SyncHostTransport,
-  SyncJoinTransport,
-  parseSyncAnswer,
-  parseSyncOffer,
-  type SyncConnectionStatus,
-  type SyncWireMessage,
-} from "./syncTransport";
+import { SyncHostTransport, SyncJoinTransport, type SyncConnectionStatus, type SyncWireMessage } from "./syncTransport";
 
 type Page = "home" | "picker" | "play" | "secretScores";
 type HomeTab = "local" | "sync";
@@ -159,7 +151,6 @@ type SecretCommand = {
 type SecretScoreUseCounts = Record<string, number>;
 
 type SyncConnectionStatuses = Record<string, SyncConnectionStatus>;
-type SyncCodeKind = "offer" | "answer";
 
 type BarcodeDetectorResult = {
   rawValue: string;
@@ -278,7 +269,6 @@ const MAX_PENALTIES = 4;
 const PENALTY_POINTS = 5;
 const HEARTBEAT_INTERVAL_MS = 5000;
 const HEARTBEAT_STALE_MS = 15000;
-const COMPACT_SYNC_CODE_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
 const SECRET_COMMANDS: SecretCommand[] = [
   { id: "openScores", sequence: ["top", "bottom", "top", "top", "bottom", "bottom"] },
   { id: "disableScores", sequence: ["top", "top", "top", "bottom", "bottom", "bottom", "top", "bottom"] },
@@ -1371,86 +1361,6 @@ function normalizeSyncConnectionStatus(value: unknown): SyncConnectionStatus | n
   return value === "connected" || value === "reconnecting" || value === "gone" ? value : null;
 }
 
-function syncCodeKindFromPrefix(value: string): SyncCodeKind | null {
-  if (value.startsWith("QWO:")) {
-    return "offer";
-  }
-
-  if (value.startsWith("QWA:")) {
-    return "answer";
-  }
-
-  return null;
-}
-
-function syncCodeLabel(kind: SyncCodeKind) {
-  return kind === "offer" ? "host code" : "answer code";
-}
-
-function syncCodePrompt(kind: SyncCodeKind) {
-  return kind === "offer" ? "Paste a host code" : "Paste an answer code";
-}
-
-function syncValidCodePrompt(kind: SyncCodeKind) {
-  return kind === "offer" ? "Paste a valid host code" : "Paste a valid answer code";
-}
-
-function parseSyncCodeKind(code: string, kind: SyncCodeKind) {
-  return kind === "offer" ? parseSyncOffer(code) : parseSyncAnswer(code);
-}
-
-function firstSyncCodeKind(value: string): SyncCodeKind | null {
-  const source = value.toUpperCase();
-  const starts = ["QWO:", "QWA:"]
-    .map((prefix) => ({ index: source.indexOf(prefix), prefix }))
-    .filter((entry) => entry.index >= 0)
-    .sort((first, second) => first.index - second.index);
-  const firstStart = starts[0];
-
-  return firstStart ? syncCodeKindFromPrefix(firstStart.prefix) : null;
-}
-
-function extractCompactSyncCode(value: string) {
-  const source = value.toUpperCase();
-  const starts = ["QWO:", "QWA:"]
-    .map((prefix) => ({ index: source.indexOf(prefix), prefix }))
-    .filter((entry) => entry.index >= 0)
-    .sort((first, second) => first.index - second.index);
-  const firstStart = starts[0];
-
-  if (!firstStart) {
-    return null;
-  }
-
-  let end = firstStart.index;
-
-  while (end < source.length && COMPACT_SYNC_CODE_CHARS.includes(source[end])) {
-    end += 1;
-  }
-
-  const code = source.slice(firstStart.index, end);
-  const kind = syncCodeKindFromPrefix(code);
-
-  if (!kind || code.length <= firstStart.prefix.length) {
-    return null;
-  }
-
-  if (parseSyncCodeKind(code, kind)) {
-    return { code, kind };
-  }
-
-  // Pasted text can place normal words after a code; trim only if the shorter value still parses.
-  for (let length = code.length - 1; length > firstStart.prefix.length; length -= 1) {
-    const candidate = code.slice(0, length);
-
-    if (parseSyncCodeKind(candidate, kind)) {
-      return { code: candidate, kind };
-    }
-  }
-
-  return null;
-}
-
 function playerName(players: Player[], playerId: string) {
   return players.find((player) => player.id === playerId)?.name ?? "A player";
 }
@@ -1549,7 +1459,6 @@ function App() {
   const [showHints, setShowHints] = useState(readStoredShowHints);
   const [syncHintsLockedOff, setSyncHintsLockedOff] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"rollUndo" | "exit" | "startOver" | null>(null);
-  const [copyFallback, setCopyFallback] = useState<{ code: string; title: string } | null>(null);
   const [draggingPlayerId, setDraggingPlayerId] = useState<string | null>(null);
   const [secretPresses, setSecretPresses] = useState<SecretDiePress[]>([]);
   const [secretScoreTurnId, setSecretScoreTurnId] = useState<string | null>(null);
@@ -1859,22 +1768,6 @@ function App() {
   ) {
     setSyncPenaltyPlayerIds(penaltyPlayerIds);
     showSyncToast(formatSyncAdvanceToast(scoreCard, closedBy, penaltyPlayerIds, playersForNames));
-  }
-
-  async function copySyncCode(code: string, kind: SyncCodeKind) {
-    try {
-      if (!navigator.clipboard) {
-        throw new Error("Clipboard unavailable");
-      }
-
-      await navigator.clipboard.writeText(code);
-      showSyncToast("Copied");
-    } catch {
-      setCopyFallback({
-        code,
-        title: kind === "offer" ? "Host code" : "Answer code",
-      });
-    }
   }
 
   function setPeerConnectionStatus(playerId: string, status: SyncConnectionStatus, broadcast = true) {
@@ -2536,7 +2429,6 @@ function App() {
     setSyncCameraMode(null);
     setSyncMessage("");
     setIsAcceptingAnswer(false);
-    setCopyFallback(null);
     clearSyncAdvanceFeedback();
   }
 
@@ -4012,14 +3904,7 @@ function App() {
 
               {syncRole === "host" && syncPhase === "hostLobby" ? (
                 <>
-                  {syncQrText ? (
-                    <QrPanel
-                      copyLabel="Copy host code"
-                      label="Host QR"
-                      text={syncQrText}
-                      onCopy={() => void copySyncCode(syncQrText, "offer")}
-                    />
-                  ) : null}
+                  {syncQrText ? <QrPanel label="Host QR" text={syncQrText} /> : null}
                   <ScoreCardChoice scoreCard={personalScoreCard} onEdit={() => openScoreCardPicker("syncHost")} />
                   <button
                     className="primary wide-button start-button"
@@ -4034,14 +3919,7 @@ function App() {
 
               {syncRole === "joiner" && (syncPhase === "showAnswer" || syncPhase === "lobby") ? (
                 <>
-                  {syncAnswerText ? (
-                    <QrPanel
-                      copyLabel="Copy answer code"
-                      label="Answer QR"
-                      text={syncAnswerText}
-                      onCopy={() => void copySyncCode(syncAnswerText, "answer")}
-                    />
-                  ) : null}
+                  {syncAnswerText ? <QrPanel label="Answer QR" text={syncAnswerText} /> : null}
                   {syncHomeScoreCard ? <ScoreCardChoice scoreCard={syncHomeScoreCard} /> : null}
                   <SyncLobby
                     isHost={false}
@@ -4308,6 +4186,11 @@ function App() {
             <ScoreTotals scoreCard={scoreCard} rows={rows} penalties={penalties} turn={turn} totalScore={totalScore} />
           </section>
 
+          {mode === "sync" && syncToastMessage ? (
+            <div className="sync-toast" role="status" aria-live="polite">
+              {syncToastMessage}
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -4342,23 +4225,12 @@ function App() {
         <SecretUseCountsModal entries={secretUseCountEntries} onClose={() => setSecretUseCountsOpen(false)} />
       ) : null}
 
-      {mode === "sync" && syncToastMessage ? (
-        <div className="sync-toast" role="status" aria-live="polite">
-          {syncToastMessage}
-        </div>
-      ) : null}
-
-      {copyFallback ? (
-        <CopyCodeModal code={copyFallback.code} title={copyFallback.title} onClose={() => setCopyFallback(null)} />
-      ) : null}
-
       {confirmAction ? (
         <ConfirmModal action={confirmAction} onCancel={cancelConfirmAction} onConfirm={confirmPendingAction} />
       ) : null}
 
       {syncCameraMode ? (
         <QrScanner
-          expectedKind={syncCameraMode === "answer" ? "answer" : "offer"}
           title={syncCameraMode === "answer" ? "Scan answer" : "Scan host"}
           onCancel={() => setSyncCameraMode(null)}
           onScan={syncCameraMode === "answer" ? acceptJoinAnswer : scanHostOffer}
@@ -4521,17 +4393,7 @@ function SyncLobby({
   );
 }
 
-function QrPanel({
-  copyLabel,
-  label,
-  onCopy,
-  text,
-}: {
-  copyLabel: string;
-  label: string;
-  onCopy: () => void;
-  text: string;
-}) {
+function QrPanel({ label, text }: { label: string; text: string }) {
   const [svg, setSvg] = useState("");
 
   useEffect(() => {
@@ -4556,24 +4418,17 @@ function QrPanel({
 
   return (
     <div className="qr-panel">
-      <div className="qr-panel-heading">
-        <span>{label}</span>
-        <button className="icon-button qr-copy-button" type="button" onClick={onCopy} aria-label={copyLabel}>
-          <Copy size={16} />
-        </button>
-      </div>
+      <span>{label}</span>
       {svg ? <div className="qr-code" role="img" aria-label={label} dangerouslySetInnerHTML={{ __html: svg }} /> : <div className="qr-placeholder" />}
     </div>
   );
 }
 
 function QrScanner({
-  expectedKind,
   onCancel,
   onScan,
   title,
 }: {
-  expectedKind: SyncCodeKind;
   onCancel: () => void;
   onScan: (value: string) => void;
   title: string;
@@ -4583,8 +4438,6 @@ function QrScanner({
   const scannedRef = useRef(false);
   const trackRef = useRef<MediaStreamTrack | null>(null);
   const [error, setError] = useState("");
-  const [pasteError, setPasteError] = useState("");
-  const [pasteText, setPasteText] = useState("");
   const [status, setStatus] = useState("Looking for QR");
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
@@ -4719,28 +4572,6 @@ function QrScanner({
     setTorchOn(nextTorch);
   }
 
-  function submitPaste(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    const pastedCode = extractCompactSyncCode(pasteText);
-    const pastedKind = firstSyncCodeKind(pasteText);
-
-    if (!pastedKind || pastedKind !== expectedKind) {
-      setPasteError(syncCodePrompt(expectedKind));
-      return;
-    }
-
-    if (!pastedCode) {
-      setPasteError(syncValidCodePrompt(expectedKind));
-      return;
-    }
-
-    scannedRef.current = true;
-    setPasteError("");
-    setStatus("Code found");
-    onScan(pastedCode.code);
-  }
-
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="scanner-modal" role="dialog" aria-modal="true" aria-labelledby="scanner-title">
@@ -4750,21 +4581,6 @@ function QrScanner({
             <X size={17} />
           </button>
         </div>
-        <form className="scanner-paste" onSubmit={submitPaste}>
-          <textarea
-            value={pasteText}
-            onChange={(event) => {
-              setPasteText(event.target.value);
-              setPasteError("");
-            }}
-            placeholder={syncCodePrompt(expectedKind)}
-            aria-label={syncCodePrompt(expectedKind)}
-            rows={2}
-          />
-          <button className="primary icon-button" type="submit" aria-label={`Use pasted ${syncCodeLabel(expectedKind)}`}>
-            <Check size={18} />
-          </button>
-        </form>
         <div className="scanner-frame">
           <video ref={videoRef} muted playsInline />
           <span className="scanner-target" aria-hidden="true" />
@@ -4775,7 +4591,7 @@ function QrScanner({
           </button>
         ) : null}
         <canvas ref={canvasRef} hidden />
-        <p className="sync-status">{pasteError || error || status}</p>
+        <p className="sync-status">{error || status}</p>
       </section>
     </div>
   );
@@ -5229,35 +5045,6 @@ function ConfirmModal({
             {copy.confirmLabel}
           </button>
         </div>
-      </section>
-    </div>
-  );
-}
-
-function CopyCodeModal({
-  code,
-  onClose,
-  title,
-}: {
-  code: string;
-  onClose: () => void;
-  title: string;
-}) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    textareaRef.current?.focus();
-    textareaRef.current?.select();
-  }, [code]);
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="confirm-modal copy-code-modal" role="dialog" aria-modal="true" aria-labelledby="copy-code-title">
-        <h2 id="copy-code-title">{title}</h2>
-        <textarea ref={textareaRef} value={code} readOnly aria-label={title} />
-        <button className="secondary" type="button" onClick={onClose} aria-label="Close">
-          <X size={18} />
-        </button>
       </section>
     </div>
   );
